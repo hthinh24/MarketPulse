@@ -1,0 +1,3 @@
+module MarketPulse
+
+go 1.24.3
