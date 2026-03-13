@@ -1,8 +1,8 @@
 package main
 
 import (
-	"MarketPulse/internal/kafka"
-	"MarketPulse/internal/model"
+	"MarketPulse/internal/dto"
+	"MarketPulse/internal/infra/kafka/producer"
 	"context"
 	"encoding/json"
 	segmentio "github.com/segmentio/kafka-go"
@@ -35,10 +35,10 @@ func main() {
 
 	log.Println("Websocket connected to Binance stream successfully!")
 
-	kafkaWriter := kafka.NewProducer("localhost:9092", "market_trades")
+	kafkaWriter := producer.NewProducer("localhost:9092", "market_trades")
 	defer kafkaWriter.Close()
 
-	var trade model.Trade
+	var trade dto.Trade
 	for {
 		_, message, err := conn.ReadMessage()
 		if err != nil {
@@ -46,12 +46,14 @@ func main() {
 			break
 		}
 
+		log.Println("Received raw message:", string(message))
+
 		json.Unmarshal(message, &trade)
 
 		err = kafkaWriter.WriteMessages(context.Background(),
 			segmentio.Message{
 				Key:   []byte(trade.Symbol),
-				Value: message, // Raw JSON
+				Value: message,
 			},
 		)
 		if err != nil {

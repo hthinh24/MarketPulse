@@ -1,6 +1,19 @@
 version: '3.8'
 
 services:
+  timescaledb:
+    image: timescale/timescaledb:latest-pg17
+    container_name: marketpulse_tsdb
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=root
+      - POSTGRES_DB=marketpulse
+    restart: always
+    volumes:
+      - D:/workspace/Projects/MarketPulse/timescale-data:/var/lib/postgresql/data
+
   zookeeper:
     image: confluentinc/cp-zookeeper:7.4.10
     container_name: marketpulse_zk
@@ -31,6 +44,7 @@ services:
       KAFKA_LOG_RETENTION_BYTES: 1073741824 # Storage data up to 1GB
     volumes:
       - D:/workspace/Projects/MarketPulse/kafka-data:/var/lib/kafka/data
+
   kafka-ui:
     image: provectuslabs/kafka-ui:v0.7.2
     container_name: marketpulse_ui

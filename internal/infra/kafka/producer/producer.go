@@ -1,4 +1,4 @@
-package kafka
+package producer
 
 import (
 	"github.com/segmentio/kafka-go"
