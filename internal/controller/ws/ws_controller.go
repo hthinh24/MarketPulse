@@ -1,6 +1,8 @@
 package ws
 
 import (
+	"MarketPulse/internal/dto"
+	"encoding/json"
 	"github.com/gorilla/websocket"
 	"log"
 	"net/http"
