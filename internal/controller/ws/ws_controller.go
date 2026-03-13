@@ -1,8 +1,6 @@
 package ws
 
 import (
-	"MarketPulse/internal/dto"
-	"encoding/json"
 	"github.com/gorilla/websocket"
 	"log"
 	"net/http"
@@ -30,44 +28,6 @@ func NewWSController(b IBroadcaster) *WSController {
 	}
 }
 
-//func (c *WSController) HandleConnection(ctx *gin.Context) {
-//	ws, err := c.upgrader.Upgrade(ctx.Writer, ctx.Request, nil)
-//	if err != nil {
-//		log.Printf("Failed to upgrade to WebSocket: %v", err)
-//		return
-//	}
-//
-//	var wsPayload dto.WSPayload
-//	if err := ctx.ShouldBindQuery(&wsPayload); err != nil {
-//		return
-//	}
-//
-//	log.Printf("Received WebSocket connection with payload: %+v", wsPayload)
-//	defer c.broadcaster.UnsubscribeFromRoom(wsPayload.Symbol, ws)
-//
-//	if wsPayload.Symbol == "" {
-//		log.Printf("Missing required query parameter: symbol")
-//		return
-//	}
-//
-//	if wsPayload.Interval == "" {
-//		wsPayload.Interval = "1m"
-//	}
-//
-//	channel := wsPayload.Symbol + ":" + wsPayload.Interval
-//	c.broadcaster.SubscribeToRoom(channel, ws)
-//
-//	log.Printf("New WebSocket connection established: %s", ws.RemoteAddr())
-//
-//	for {
-//		_, _, err := ws.ReadMessage()
-//		if err != nil {
-//			break
-//		}
-//	}
-//}
-
-// Bỏ mẹ cái *gin.Context đi, xài chuẩn net/http của Go
 func (c *WSController) HandleConnection(w http.ResponseWriter, r *http.Request) {
 	symbol := r.URL.Query().Get("symbol")
 	if symbol == "" {
