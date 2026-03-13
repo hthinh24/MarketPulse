@@ -1,36 +1,42 @@
 package main
 
 import (
-	"MarketPulse/internal/infra/kafka/consumer"
+	controller "MarketPulse/internal/controller/http"
 	repository "MarketPulse/internal/infra/repository/postgres"
 	cache "MarketPulse/internal/infra/repository/redis"
 	"MarketPulse/internal/service"
-	"context"
+	"github.com/gin-contrib/cors"
+	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
-	"github.com/segmentio/kafka-go"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"log"
 )
 
 func main() {
+	// TODO(refactor): Move Init function to separate package and use dependency injection
 	db := InitDB()
 	rdb := initRedisDB()
 
 	defer func() {
 		if err := rdb.Close(); err != nil {
-			return
+			log.Printf("Error closing Redis client: %v", err)
 		}
 	}()
 
 	candleRepository := repository.NewCandleRepository(db)
 	candleCache := cache.NewCandleCache(rdb)
 	candleService := service.NewCandleService(rdb, candleCache, candleRepository)
+	candleController := controller.NewCandleController(candleService)
 
-	kafkaReader := InitKafkaReader("localhost:9092", "market_trades", "vibe-aggregator-group")
-	defer kafkaReader.Close()
+	r := gin.Default()
+	r.Use(cors.Default())
 
-	consumer := consumer.NewConsumer(kafkaReader, candleService)
-	consumer.StartConsuming(context.Background())
+	v1 := r.Group("/api/v1")
+	candleController.RegisterRoutes(v1)
+
+	log.Print("Server is running on port 8080")
+	r.Run(":8000")
 }
 
 func InitDB() *gorm.DB {
@@ -46,17 +52,8 @@ func InitDB() *gorm.DB {
 func initRedisDB() *redis.Client {
 	rdb := redis.NewClient(&redis.Options{
 		Addr:     "localhost:6379",
-		Password: "", // no password set
-		DB:       0,  // use default DB
+		Password: "",
+		DB:       0,
 	})
 	return rdb
-}
-
-func InitKafkaReader(brokerURL string, topic string, groupID string) *kafka.Reader {
-	return kafka.NewReader(kafka.ReaderConfig{
-		Brokers:     []string{brokerURL},
-		Topic:       topic,
-		GroupID:     groupID,
-		StartOffset: kafka.LastOffset,
-	})
 }

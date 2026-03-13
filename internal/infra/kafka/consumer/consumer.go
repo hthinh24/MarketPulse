@@ -31,23 +31,23 @@ func (c *Consumer) StartConsuming(ctx context.Context) {
 		msg, err := c.reader.ReadMessage(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
-				log.Println("Đã nhận lệnh dừng Kafka Consumer.")
+				log.Println("Kafka consumer stopped, err:", err)
 				break
 			}
-			log.Printf("Lỗi khi hút data: %v\n", err)
 			continue
 		}
 
 		var trade dto.Trade
 		if err := json.Unmarshal(msg.Value, &trade); err != nil {
-			log.Printf("Lỗi khi parse message: %v\n", err)
+			log.Println("Error unmarshalling Kafka message:", err)
 			continue
 		}
 
 		c.processor.ProcessTick(trade.Symbol, trade.EventTime, trade)
 
+		// TODO: Handle commit errors, batching commits, etc.
 		if err := c.reader.CommitMessages(ctx, msg); err != nil {
-			log.Println("Lỗi commit Kafka:", err)
+			log.Println("Failed to commit message:", err)
 			return
 		}
 	}

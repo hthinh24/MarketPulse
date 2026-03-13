@@ -3,7 +3,7 @@ version: '3.8'
 services:
   timescaledb:
     image: timescale/timescaledb:latest-pg17
-    container_name: marketpulse_tsdb
+    container_name: marketpulse-tsdb
     ports:
       - "5432:5432"
     environment:
@@ -14,16 +14,23 @@ services:
     volumes:
       - D:/workspace/Projects/MarketPulse/timescale-data:/var/lib/postgresql/data
 
+  redis:
+    image: redis:8.0-alpine
+    container_name: marketpulse-cache
+    ports:
+      - "6379:6379"
+    restart: always
+
   zookeeper:
     image: confluentinc/cp-zookeeper:7.4.10
-    container_name: marketpulse_zk
+    container_name: marketpulse-zk
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
 
   kafka:
     image: confluentinc/cp-kafka:7.4.10
-    container_name: marketpulse_kafka
+    container_name: marketpulse-kafka
     depends_on:
       - zookeeper
     ports:
@@ -47,7 +54,7 @@ services:
 
   kafka-ui:
     image: provectuslabs/kafka-ui:v0.7.2
-    container_name: marketpulse_ui
+    container_name: marketpulse-ui
     depends_on:
       - kafka
     ports:

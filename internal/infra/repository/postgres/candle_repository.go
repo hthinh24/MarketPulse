@@ -16,3 +16,17 @@ func NewCandleRepository(db *gorm.DB) *CandleRepository {
 func (c *CandleRepository) SaveCandle(candle *entity.CandleEntity) error {
 	return c.db.Create(candle).Error
 }
+
+func (c *CandleRepository) GetHistoricalCandles(symbol string, limit int) ([]*entity.CandleEntity, error) {
+	var candles []*entity.CandleEntity
+	err := c.db.Where("symbol = ?", symbol).
+		Order("start_time desc").
+		Limit(limit).
+		Find(&candles).
+		Error
+	if err != nil {
+		return nil, err
+	}
+
+	return candles, nil
+}
