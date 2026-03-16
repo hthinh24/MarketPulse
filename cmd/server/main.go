@@ -26,8 +26,8 @@ func main() {
 
 	candleRepository := repository.NewCandleRepository(db)
 	candleCache := cache.NewCandleCache(rdb)
-	candleService := service.NewCandleService(rdb, candleCache, candleRepository)
-	candleController := controller.NewCandleController(candleService)
+	candleQueryService := service.NewCandleQueryService(candleCache, candleRepository)
+	candleController := controller.NewCandleController(candleQueryService)
 
 	r := gin.Default()
 	r.Use(cors.Default())

@@ -5,6 +5,7 @@ import (
 	repository "MarketPulse/internal/infra/repository/postgres"
 	cache "MarketPulse/internal/infra/repository/redis"
 	"MarketPulse/internal/service"
+	"MarketPulse/internal/worker"
 	"context"
 	"github.com/go-redis/redis/v8"
 	"github.com/segmentio/kafka-go"
@@ -22,12 +23,18 @@ func main() {
 		}
 	}()
 
-	candleRepository := repository.NewCandleRepository(db)
-	candleCache := cache.NewCandleCache(rdb)
-	candleService := service.NewCandleService(rdb, candleCache, candleRepository)
+	bufferSize := 5000
+	candleService := service.NewCandleAggregateService(rdb, bufferSize)
 
 	kafkaReader := InitKafkaReader("localhost:9092", "market_trades", "vibe-aggregator-group")
 	defer kafkaReader.Close()
+
+	candleRepository := repository.NewCandleRepository(db)
+	candleCache := cache.NewCandleCache(rdb)
+	dbIngester := worker.NewDBIngestor(bufferSize, candleCache, candleRepository)
+
+	go dbIngester.Start()
+	defer dbIngester.Stop()
 
 	consumer := consumer.NewConsumer(kafkaReader, candleService)
 	consumer.StartConsuming(context.Background())

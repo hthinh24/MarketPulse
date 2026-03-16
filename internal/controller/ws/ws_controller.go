@@ -7,9 +7,13 @@ import (
 )
 
 type IBroadcaster interface {
-	SubscribeToRoom(room string, conn *websocket.Conn)
-	UnsubscribeFromRoom(room string, conn *websocket.Conn)
-	RemoveClient(conn *websocket.Conn)
+	//SubscribeToRoom(room string, conn *websocket.Conn)
+	//UnsubscribeFromRoom(room string, conn *websocket.Conn)
+	//RemoveClient(conn *websocket.Conn)
+
+	SubscribeToRoom(topic string, client *Client)
+	UnsubscribeFromRoom(topic string, client *Client)
+	RemoveClient(client *Client)
 }
 
 type WSController struct {
@@ -45,21 +49,65 @@ func (c *WSController) HandleConnection(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	//	room := symbol + ":" + intervel
+	//	c.broadcaster.SubscribeToRoom(room, conn)
+	//
+	//	defer func() {
+	//		c.broadcaster.UnsubscribeFromRoom(room, conn)
+	//		conn.Close()
+	//	}()
+	//
+	//	for {
+	//		_, _, err := conn.ReadMessage()
+	//		if err != nil {
+	//			break
+	//		}
+	//	}
+
 	room := symbol + ":" + intervel
-	c.broadcaster.SubscribeToRoom(room, conn)
+	client := NewClient(c.broadcaster, conn)
+	defer c.broadcaster.RemoveClient(client)
 
-	defer func() {
-		c.broadcaster.UnsubscribeFromRoom(room, conn)
-		conn.Close()
-	}()
+	c.broadcaster.SubscribeToRoom(room, client)
 
-	for {
-		_, _, err := conn.ReadMessage()
-		if err != nil {
-			break
-		}
-	}
+	log.Printf("Client %p subscribed to room: %s\n", client, room)
+
+	go client.readPump()
+	client.writePump()
 }
+
+//func (c *WSController) HandleConnection(w http.ResponseWriter, r *http.Request) {
+//	symbol := r.URL.Query().Get("symbol")
+//	if symbol == "" {
+//		log.Printf("Missing required query parameter: symbol\n")
+//		return
+//	}
+//	intervel := r.URL.Query().Get("interval")
+//	if intervel == "" {
+//		intervel = "1m"
+//	}
+//
+//	conn, err := c.upgrader.Upgrade(w, r, nil)
+//	if err != nil {
+//		log.Printf("Failed to upgrade to WebSocket: %v\n", err)
+//		return
+//	}
+//
+//	room := symbol + ":" + intervel
+//	c.broadcaster.SubscribeToRoom(room, conn)
+//
+//	defer func() {
+//		c.broadcaster.UnsubscribeFromRoom(room, conn)
+//		conn.Close()
+//	}()
+//
+//	for {
+//		_, _, err := conn.ReadMessage()
+//		if err != nil {
+//			break
+//		}
+//	}
+//}
 
 //func (c *WSController) HandleConnection(w http.ResponseWriter, r *http.Request) {
 //	ws, err := c.upgrader.Upgrade(w, r, nil)

@@ -43,6 +43,8 @@ func main() {
 		_, message, err := conn.ReadMessage()
 		if err != nil {
 			log.Println("Can`t read message, err:", err)
+
+			// TODO(refactor): Need logic to reconnect to websocket if lost connection
 			break
 		}
 
