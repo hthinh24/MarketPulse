@@ -1,19 +1,27 @@
 package main
 
 import (
-	"MarketPulse/internal/infra/kafka/consumer"
 	repository "MarketPulse/internal/infra/repository/postgres"
 	cache "MarketPulse/internal/infra/repository/redis"
 	"MarketPulse/internal/service"
 	"MarketPulse/internal/worker"
+	"MarketPulse/internal/worker/aggregator"
 	"context"
 	"github.com/go-redis/redis/v8"
 	"github.com/segmentio/kafka-go"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"log"
+	"os/signal"
+	"sync"
+	"syscall"
+	"time"
 )
 
 func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	db := InitDB()
 	rdb := initRedisDB()
 
@@ -33,11 +41,31 @@ func main() {
 	candleCache := cache.NewCandleCache(rdb)
 	dbIngester := worker.NewDBIngestor(bufferSize, candleCache, candleRepository)
 
-	go dbIngester.Start()
-	defer dbIngester.Stop()
+	consumer := aggregator.NewConsumer(kafkaReader, candleService)
 
-	consumer := consumer.NewConsumer(kafkaReader, candleService)
-	consumer.StartConsuming(context.Background())
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	go dbIngester.Start(ctx, &wg)
+	wg.Add(1)
+	go consumer.StartConsuming(ctx, &wg)
+
+	<-ctx.Done()
+
+	timeoutContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	doneChan := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(doneChan)
+	}()
+
+	select {
+	case <-doneChan:
+		log.Println("Shutdown signal received, waiting for ongoing operations to finish...")
+	case <-timeoutContext.Done():
+		log.Println("Timeout reached, forcing shutdown...")
+	}
 }
 
 func InitDB() *gorm.DB {

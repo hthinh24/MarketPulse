@@ -1,10 +1,10 @@
-package producer
+package kafka
 
 import (
 	"github.com/segmentio/kafka-go"
 )
 
-func NewProducer(address, topic string) *kafka.Writer {
+func NewKafkaWriter(address, topic string) *kafka.Writer {
 	return &kafka.Writer{
 		Addr:     kafka.TCP(address),
 		Topic:    topic,

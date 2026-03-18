@@ -1,67 +1,70 @@
 package main
 
 import (
+	"MarketPulse/internal/config/kafka"
 	"MarketPulse/internal/dto"
-	"MarketPulse/internal/infra/kafka/producer"
+	"MarketPulse/internal/worker/ingestor"
 	"context"
-	"encoding/json"
-	segmentio "github.com/segmentio/kafka-go"
 	"log"
+	"os/signal"
+	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
 func main() {
-	url := "wss://stream.binance.com:9443/ws/btcusdt@trade"
-
-	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
-	if err != nil {
-		log.Fatalf("Failed to connect to Binance stream: %v", err)
-	}
-	defer conn.Close()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	var counter uint64
+
 	go func() {
 		ticker := time.NewTicker(1 * time.Second)
 		defer ticker.Stop()
-
-		for range ticker.C {
-			currentTPS := atomic.SwapUint64(&counter, 0)
-			log.Printf("[Metrics] %d trades/sec", currentTPS)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				currentTPS := atomic.SwapUint64(&counter, 0)
+				log.Printf("[Metrics] %d trades/sec\n", currentTPS)
+			}
 		}
 	}()
 
-	log.Println("Websocket connected to Binance stream successfully!")
+	wg := sync.WaitGroup{}
 
-	kafkaWriter := producer.NewProducer("localhost:9092", "market_trades")
+	kafkaWriter := kafka.NewKafkaWriter("localhost:9092", "market_trades")
 	defer kafkaWriter.Close()
 
-	var trade dto.Trade
-	for {
-		_, message, err := conn.ReadMessage()
-		if err != nil {
-			log.Println("Can`t read message, err:", err)
+	writerPool := ingestor.NewWorkerPool(5)
+	tradeChan := make(chan dto.Trade, 5000)
 
-			// TODO(refactor): Need logic to reconnect to websocket if lost connection
-			break
-		}
+	wg.Add(1)
+	go writerPool.Start(ctx, &wg, tradeChan, kafkaWriter, &counter)
 
-		log.Println("Received raw message:", string(message))
+	url := "wss://stream.binance.com:9443/ws/btcusdt@trade"
+	binanceIngester := ingestor.NewBinanceIngestor(url, tradeChan)
+	wg.Add(1)
+	go binanceIngester.Start(ctx, &wg)
 
-		json.Unmarshal(message, &trade)
+	// Graceful shutdown
+	<-ctx.Done()
 
-		err = kafkaWriter.WriteMessages(context.Background(),
-			segmentio.Message{
-				Key:   []byte(trade.Symbol),
-				Value: message,
-			},
-		)
-		if err != nil {
-			log.Printf("Failed to write message to Kafka: %v", err)
-		}
+	timeoutContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
-		atomic.AddUint64(&counter, 1)
+	doneChan := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(doneChan)
+	}()
+
+	select {
+	case <-doneChan:
+		log.Println("Shutdown signal received, waiting for ongoing operations to finish...")
+	case <-timeoutContext.Done():
+		log.Println("Timeout reached, forcing shutdown...")
 	}
 }

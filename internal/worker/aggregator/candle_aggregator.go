@@ -1,0 +1,67 @@
+package aggregator
+
+import (
+	"MarketPulse/internal/dto"
+	"context"
+	"encoding/json"
+	"github.com/segmentio/kafka-go"
+	"log"
+	"sync"
+)
+
+type ICandleProcessor interface {
+	ProcessTick(symbol string, tickTime int64, trade dto.Trade)
+}
+
+type CandleAggregator struct {
+	reader    *kafka.Reader
+	processor ICandleProcessor
+}
+
+func NewConsumer(reader *kafka.Reader, processor ICandleProcessor) *CandleAggregator {
+	return &CandleAggregator{
+		reader:    reader,
+		processor: processor,
+	}
+}
+
+func (c *CandleAggregator) StartConsuming(ctx context.Context, wg *sync.WaitGroup) {
+	log.Println("Kafka consumer started, waiting for messages...")
+	defer wg.Done()
+
+	for {
+		select {
+		case <-ctx.Done():
+			c.cleanup()
+		default:
+			msg, err := c.reader.ReadMessage(ctx)
+			if err != nil {
+				if ctx.Err() != nil {
+					log.Println("Kafka consumer stopped, err:", err)
+					break
+				}
+				continue
+			}
+
+			var trade dto.Trade
+			if err := json.Unmarshal(msg.Value, &trade); err != nil {
+				log.Println("Error unmarshalling Kafka message:", err)
+				continue
+			}
+
+			c.processor.ProcessTick(trade.Symbol, trade.EventTime, trade)
+
+			// TODO: Handle commit errors, batching commits, etc.
+			if err := c.reader.CommitMessages(ctx, msg); err != nil {
+				log.Println("Failed to commit message:", err)
+				return
+			}
+		}
+	}
+}
+
+func (c *CandleAggregator) cleanup() {
+	if err := c.reader.Close(); err != nil {
+		log.Println("Failed to close Kafka reader:", err)
+	}
+}

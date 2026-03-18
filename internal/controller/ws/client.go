@@ -14,25 +14,31 @@ const (
 )
 
 type Hub interface {
-	RemoveClient(client *Client)
+	RemoveClient(client *WSClient)
 }
 
-type Client struct {
+// WSClient represents a single WebSocket connection to provided hub.
+// It should start by calling readPump() and writePump() in separate goroutines
+// to handle incoming and outgoing messages from server and health check (heartbeat).
+type WSClient struct {
 	hub      Hub
 	conn     *websocket.Conn
 	SendChan chan []byte
 	closeOne sync.Once
 }
 
-func NewClient(hub Hub, conn *websocket.Conn) *Client {
-	return &Client{
+func NewWSClient(hub Hub, conn *websocket.Conn) *WSClient {
+	return &WSClient{
 		hub:      hub,
 		conn:     conn,
 		SendChan: make(chan []byte, 256),
 	}
 }
 
-func (c *Client) readPump() {
+// readPump listens for incoming messages from websocket connection
+// NOTE: In this implementation, we only handle connection health check (pong messages)
+// and ignore user messages.
+func (c *WSClient) readPump() {
 	c.conn.SetReadDeadline(time.Now().Add(pongWait))
 
 	c.conn.SetPongHandler(func(string) error {
@@ -49,8 +55,11 @@ func (c *Client) readPump() {
 	}
 }
 
-func (c *Client) writePump() {
+// writePump sends messages from SendChan to the WebSocket connection
+// and also sends periodic ping messages for health check.
+func (c *WSClient) writePump() {
 	ticker := time.NewTicker(pingPeriod)
+	defer ticker.Stop()
 
 	for {
 		select {
@@ -80,7 +89,7 @@ func (c *Client) writePump() {
 	}
 }
 
-func (c *Client) Close() {
+func (c *WSClient) Close() {
 	c.closeOne.Do(func() {
 		log.Printf("Close client connection: %p\n", c)
 		close(c.SendChan)

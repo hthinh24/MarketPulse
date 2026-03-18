@@ -11,9 +11,9 @@ type IBroadcaster interface {
 	//UnsubscribeFromRoom(room string, conn *websocket.Conn)
 	//RemoveClient(conn *websocket.Conn)
 
-	SubscribeToRoom(topic string, client *Client)
-	UnsubscribeFromRoom(topic string, client *Client)
-	RemoveClient(client *Client)
+	SubscribeToRoom(topic string, client *WSClient)
+	UnsubscribeFromRoom(topic string, client *WSClient)
+	RemoveClient(client *WSClient)
 }
 
 type WSController struct {
@@ -65,12 +65,12 @@ func (c *WSController) HandleConnection(w http.ResponseWriter, r *http.Request) 
 	//	}
 
 	room := symbol + ":" + intervel
-	client := NewClient(c.broadcaster, conn)
+	client := NewWSClient(c.broadcaster, conn)
 	defer c.broadcaster.RemoveClient(client)
 
 	c.broadcaster.SubscribeToRoom(room, client)
 
-	log.Printf("Client %p subscribed to room: %s\n", client, room)
+	log.Printf("WSClient %p subscribed to room: %s\n", client, room)
 
 	go client.readPump()
 	client.writePump()

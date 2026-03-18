@@ -49,11 +49,6 @@ func (m *CandleAggregateService) ProcessTick(symbol string, tickTime int64, trad
 			candleEntity.Open.String(), candleEntity.High.String(), candleEntity.Low.String(), candleEntity.Close.String(), candleEntity.Volume.String(),
 		)
 
-		//err := m.repository.SaveCandle(candleEntity)
-		//if err != nil {
-		//	return
-		//}
-
 		m.saveChan <- *candleEntity
 
 		newStartTime := (trade.EventTime / 60000) * 60000
