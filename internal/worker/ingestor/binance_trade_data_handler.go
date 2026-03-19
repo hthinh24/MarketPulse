@@ -30,8 +30,7 @@ func (p *WorkerPool) Start(ctx context.Context, wg *sync.WaitGroup, tradeChan <-
 	poolWg := sync.WaitGroup{}
 
 	for i := 0; i < p.numWorkers; i++ {
-		wg.Add(1)
-		//go p.worker(ctx, &poolWg, i)
+		poolWg.Add(1)
 
 		worker := &Worker{
 			ID:          i,
@@ -46,36 +45,16 @@ func (p *WorkerPool) Start(ctx context.Context, wg *sync.WaitGroup, tradeChan <-
 	poolWg.Wait()
 }
 
-//func (p *WorkerPool) Start(ctx context.Context, wg *sync.WaitGroup) {
-//	defer wg.Done()
-//	var poolWg sync.WaitGroup
-//
-//	for i := 0; i < p.numWorkers; i++ {
-//		poolWg.Add(1)
-//		go p.worker(ctx, &poolWg, i)
-//	}
-//	poolWg.Wait() // Chờ đám công nhân dọn dẹp xong mới báo lên main
-//}
-
 func (p *Worker) Start(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case trade, ok := <-p.tradeChan:
-			if !ok {
-				return
-			}
-
-			msgBytes, _ := json.Marshal(trade)
-			err := p.kafkaWriter.WriteMessages(ctx, segmentio.Message{
-				Key:   []byte(trade.Symbol),
-				Value: msgBytes,
-			})
-			if err == nil {
-				atomic.AddUint64(p.counter, 1) // Ghi thành công thì đếm +1
-			}
+	for trade := range p.tradeChan {
+		msgBytes, _ := json.Marshal(trade)
+		err := p.kafkaWriter.WriteMessages(ctx, segmentio.Message{
+			Key:   []byte(trade.Symbol),
+			Value: msgBytes,
+		})
+		if err == nil {
+			atomic.AddUint64(p.counter, 1)
 		}
 	}
 }

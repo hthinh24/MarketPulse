@@ -33,7 +33,6 @@ func (i *BinanceIngestor) Start(ctx context.Context, wg *sync.WaitGroup) {
 
 	defer func() {
 		conn.Close()
-		close(i.tradeChan)
 	}()
 
 	for {
