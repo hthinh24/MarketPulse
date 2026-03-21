@@ -3,7 +3,7 @@ package dto
 type EventType string
 
 const (
-	CandleUpdatedEvent EventType = "candle_update"
+	CandleUpdated EventType = "candle_update"
 )
 
 type WSEvent struct {

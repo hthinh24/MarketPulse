@@ -4,55 +4,44 @@ import (
 	"MarketPulse/internal/dto"
 	"MarketPulse/internal/entity"
 	"MarketPulse/internal/model"
-	"context"
-	"encoding/json"
-	"github.com/go-redis/redis/v8"
 	"github.com/shopspring/decimal"
 	"log"
 	"sync"
 	"time"
 )
 
-var candleChannelPrefix = "marketpulse:candles:"
-
 type CandleAggregateService struct {
 	mu          sync.RWMutex
 	candles     map[string]*model.CandleModel
 	saveChan    chan entity.CandleEntity
-	redisClient *redis.Client
+	publishChan chan dto.CandleUpdatedEvent
 }
 
-func NewCandleAggregateService(redisClient *redis.Client, bufferSize int) *CandleAggregateService {
+func NewCandleAggregateService(saveChan chan entity.CandleEntity, publishChan chan dto.CandleUpdatedEvent) *CandleAggregateService {
 	return &CandleAggregateService{
 		mu:          sync.RWMutex{},
 		candles:     make(map[string]*model.CandleModel),
-		saveChan:    make(chan entity.CandleEntity, bufferSize),
-		redisClient: redisClient,
+		saveChan:    saveChan,
+		publishChan: publishChan,
 	}
 }
 
 func (m *CandleAggregateService) ProcessTick(symbol string, tickTime int64, trade dto.Trade) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	m.mu.RLock()
 	candle, exists := m.candles[symbol]
+	m.mu.RUnlock()
+
 	if !exists {
-		alignedStartTime := (trade.EventTime / 60000) * 60000
-		candle = model.NewCandleModel(symbol, alignedStartTime, 60000)
-		m.candles[symbol] = candle
-	}
+		m.mu.Lock()
 
-	if tickTime > candle.EndTime {
-		candleEntity := entity.NewCandleEntity(candle)
-		log.Printf("CandleEntity created for %s: Start=%d, End=%d, O=%s, H=%s, L=%s, C=%s, V=%s\n",
-			candleEntity.Symbol, candleEntity.StartTime.UnixMilli(), candleEntity.EndTime.UnixMilli(),
-			candleEntity.Open.String(), candleEntity.High.String(), candleEntity.Low.String(), candleEntity.Close.String(), candleEntity.Volume.String(),
-		)
+		candle, exists = m.candles[symbol]
+		if !exists {
+			alignedStartTime := (trade.EventTime / 60000) * 60000
+			candle = model.NewCandleModel(symbol, alignedStartTime, 60000)
+			m.candles[symbol] = candle
+		}
 
-		m.saveChan <- *candleEntity
-
-		newStartTime := (trade.EventTime / 60000) * 60000
-		candle.ResetForNextMinute(newStartTime, 60000)
+		m.mu.Unlock()
 	}
 
 	var price decimal.Decimal
@@ -68,25 +57,27 @@ func (m *CandleAggregateService) ProcessTick(symbol string, tickTime int64, trad
 		return
 	}
 
+	candle.Mu.Lock()
+	if tickTime > candle.EndTime {
+		candleEntity := entity.NewCandleEntity(candle)
+
+		m.saveChan <- *candleEntity
+
+		newStartTime := (trade.EventTime / 60000) * 60000
+		candle.ResetForNextMinute(newStartTime, 60000)
+	}
+
 	candle.Update(price, quantity, trade.IsMaker)
+	candleUpdatedEvent := createCandleUpdatedEvent(candle)
+	candle.Mu.Unlock()
 
-	channel := candleChannelPrefix + candle.Symbol + ":1m"
-	candleResponse := createCandleResponse(candle)
-	wsEvent := dto.WSEvent{
-		Type: dto.CandleUpdatedEvent,
-		Data: candleResponse,
+	select {
+	case m.publishChan <- *candleUpdatedEvent:
+	default:
 	}
-
-	redisMessage, err := json.Marshal(wsEvent)
-	if err != nil {
-		log.Printf("Error marshalling candle for Redis: %v\n", err)
-		return
-	}
-
-	m.redisClient.Publish(context.Background(), channel, redisMessage)
 }
 
-func createCandleResponse(candle *model.CandleModel) *dto.CandleResponse {
+func createCandleUpdatedEvent(candle *model.CandleModel) *dto.CandleUpdatedEvent {
 	startTime := time.UnixMilli(candle.StartTime).UTC()
 	open, _ := candle.Open.Float64()
 	high, _ := candle.High.Float64()
@@ -94,7 +85,8 @@ func createCandleResponse(candle *model.CandleModel) *dto.CandleResponse {
 	closePrice, _ := candle.Close.Float64()
 	volume, _ := candle.Volume.Float64()
 
-	return &dto.CandleResponse{
+	return &dto.CandleUpdatedEvent{
+		Symbol:   candle.Symbol,
 		OpenTime: startTime.UnixMilli(),
 		Open:     open,
 		High:     high,

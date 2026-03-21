@@ -1,5 +1,10 @@
 package dto
 
+type BinanceWsPayload struct {
+	Stream string `json:"stream"`
+	Data   Trade  `json:"data"`
+}
+
 type Trade struct {
 	Symbol    string `json:"s"`
 	Price     string `json:"p"`

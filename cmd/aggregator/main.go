@@ -1,6 +1,8 @@
 package main
 
 import (
+	"MarketPulse/internal/dto"
+	"MarketPulse/internal/entity"
 	repository "MarketPulse/internal/infra/repository/postgres"
 	cache "MarketPulse/internal/infra/repository/redis"
 	"MarketPulse/internal/service"
@@ -31,23 +33,31 @@ func main() {
 		}
 	}()
 
-	bufferSize := 5000
-	candleService := service.NewCandleAggregateService(rdb, bufferSize)
+	batchSize := 400
+	saveChanSize := 5000
+	publishChanSize := 10000
 
-	kafkaReader := InitKafkaReader("localhost:9092", "market_trades", "vibe-aggregator-group")
-	defer kafkaReader.Close()
+	saveChan := make(chan entity.CandleEntity, saveChanSize)
+	publishChan := make(chan dto.CandleUpdatedEvent, publishChanSize)
+
+	candleService := service.NewCandleAggregateService(saveChan, publishChan)
+	candleUpdatePublisher := aggregator.NewCandleUpdatePublisher(publishChan, rdb)
+
+	readerConfig := InitKafkaReaderConfig("localhost:9092", "market_trades", "vibe-aggregator-group")
 
 	candleRepository := repository.NewCandleRepository(db)
 	candleCache := cache.NewCandleCache(rdb)
-	dbIngester := worker.NewDBIngestor(bufferSize, candleCache, candleRepository)
+	dbIngestor := worker.NewDBIngestor(saveChan, candleCache, candleRepository, batchSize)
 
-	consumer := aggregator.NewConsumer(kafkaReader, candleService)
+	tickDataReaderManager := aggregator.NewTickDataReaderManager(4, *readerConfig, candleService)
 
 	wg := sync.WaitGroup{}
 	wg.Add(1)
-	go dbIngester.Start(ctx, &wg)
+	go dbIngestor.Start(ctx, &wg)
 	wg.Add(1)
-	go consumer.StartConsuming(ctx, &wg)
+	go candleUpdatePublisher.Start(ctx, &wg)
+	wg.Add(1)
+	go tickDataReaderManager.Start(ctx, &wg)
 
 	<-ctx.Done()
 
@@ -87,11 +97,11 @@ func initRedisDB() *redis.Client {
 	return rdb
 }
 
-func InitKafkaReader(brokerURL string, topic string, groupID string) *kafka.Reader {
-	return kafka.NewReader(kafka.ReaderConfig{
+func InitKafkaReaderConfig(brokerURL string, topic string, groupID string) *kafka.ReaderConfig {
+	return &kafka.ReaderConfig{
 		Brokers:     []string{brokerURL},
 		Topic:       topic,
 		GroupID:     groupID,
 		StartOffset: kafka.LastOffset,
-	})
+	}
 }

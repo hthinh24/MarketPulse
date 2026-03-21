@@ -1,8 +1,13 @@
 package model
 
-import "github.com/shopspring/decimal"
+import (
+	"github.com/shopspring/decimal"
+	"sync"
+)
 
 type CandleModel struct {
+	Mu sync.RWMutex
+
 	Symbol    string `json:"symbol"`
 	StartTime int64  `json:"start_time"`
 

@@ -46,9 +46,9 @@ func (i *BinanceIngestor) Start(ctx context.Context, wg *sync.WaitGroup) {
 				return
 			}
 
-			var trade dto.Trade
-			if err := json.Unmarshal(message, &trade); err == nil {
-				i.tradeChan <- trade
+			var binanceWsPayload dto.BinanceWsPayload
+			if err := json.Unmarshal(message, &binanceWsPayload); err == nil {
+				i.tradeChan <- binanceWsPayload.Data
 			}
 		}
 	}
