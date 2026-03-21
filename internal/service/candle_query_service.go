@@ -11,11 +11,14 @@ import (
 type ICandleRepository interface {
 	SaveCandle(candle *entity.CandleEntity) error
 	GetHistoricalCandles(symbol string, limit int) ([]*entity.CandleEntity, error)
+	GetAvailableSymbols() ([]string, error)
 }
 
 type ICandleCache interface {
 	GetCandles(ctx context.Context, symbol string, interval string, limit int, endTime int64) ([]*dto.CandleResponse, error)
 	SetCandles(ctx context.Context, symbol string, interval string, candles []*dto.CandleResponse, ttl time.Duration) error
+	GetAvailableSymbols(ctx context.Context) ([]string, error)
+	SetAvailableSymbols(ctx context.Context, symbols []string, ttl time.Duration) error
 }
 
 type CandleQueryService struct {
@@ -74,4 +77,29 @@ func (m *CandleQueryService) GetHistoricalCandles(ctx context.Context, request *
 	}
 
 	return candleResponses, nil
+}
+
+func (c *CandleQueryService) GetAvailableSymbols(ctx context.Context) ([]string, error) {
+	symbols, err := c.candleCache.GetAvailableSymbols(ctx)
+	if err != nil {
+		log.Printf("Error fetching available symbols from cache: %v\n", err)
+		return nil, err
+	}
+
+	if len(symbols) == 0 {
+		log.Println("cache miss, fetching from repository")
+		symbols, err = c.repository.GetAvailableSymbols()
+		if err != nil {
+			log.Printf("Error fetching available symbols from repository: %v\n", err)
+			return nil, err
+		}
+
+		err = c.candleCache.SetAvailableSymbols(ctx, symbols, 10*time.Minute)
+		if err != nil {
+			log.Printf("Error setting available symbols into cache: %v\n", err)
+			return nil, err
+		}
+	}
+
+	return symbols, nil
 }

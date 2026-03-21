@@ -5,12 +5,14 @@ import (
 	repository "MarketPulse/internal/infra/repository/postgres"
 	cache "MarketPulse/internal/infra/repository/redis"
 	"MarketPulse/internal/service"
+	"context"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"log"
+	"time"
 )
 
 func main() {

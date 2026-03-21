@@ -11,7 +11,8 @@ import (
 	"time"
 )
 
-var keyPrefix = "marketpulse:candles:"
+var candleKeyPrefix = "marketpulse:candles:"
+var symbolKeyPrefix = "marketpulse:symbols"
 
 type CandleCache struct {
 	redis *redis.Client
@@ -28,7 +29,7 @@ func NewCandleCache(redis *redis.Client) *CandleCache {
  */
 // TODO(Refactor): Add ZREMRANGEBYSCORE to remove old candles
 func (c *CandleCache) GetCandles(ctx context.Context, symbol string, interval string, limit int, endTime int64) ([]*dto.CandleResponse, error) {
-	key := keyPrefix + interval + ":" + symbol
+	key := candleKeyPrefix + interval + ":" + symbol
 
 	maxScore := "+inf"
 	if endTime > 0 {
@@ -63,7 +64,7 @@ func (c *CandleCache) GetCandles(ctx context.Context, symbol string, interval st
 }
 
 func (c *CandleCache) SetCandles(ctx context.Context, symbol string, interval string, candles []*dto.CandleResponse, ttl time.Duration) error {
-	key := keyPrefix + interval + ":" + symbol
+	key := candleKeyPrefix + interval + ":" + symbol
 
 	zItems := make([]*redis.Z, 0, len(candles))
 	for _, candle := range candles {
@@ -88,6 +89,34 @@ func (c *CandleCache) SetCandles(ctx context.Context, symbol string, interval st
 	}
 	if err := c.redis.Expire(ctx, key, ttl).Err(); err != nil {
 		log.Println("Failed to set TTL for candles in Redis: " + err.Error())
+		return err
+	}
+
+	return nil
+}
+
+func (c *CandleCache) GetAvailableSymbols(ctx context.Context) ([]string, error) {
+	val, err := c.redis.SMembers(ctx, symbolKeyPrefix).Result()
+	if errors.Is(err, redis.Nil) || len(val) == 0 {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+
+	return val, nil
+}
+
+func (c *CandleCache) SetAvailableSymbols(ctx context.Context, symbols []string, ttl time.Duration) error {
+	if len(symbols) == 0 {
+		return nil
+	}
+
+	if err := c.redis.SAdd(ctx, symbolKeyPrefix, symbols).Err(); err != nil {
+		log.Println("Failed to add symbols to Redis: " + err.Error())
+		return err
+	}
+	if err := c.redis.Expire(ctx, symbolKeyPrefix, ttl).Err(); err != nil {
+		log.Println("Failed to set TTL for symbols in Redis: " + err.Error())
 		return err
 	}
 

@@ -34,3 +34,16 @@ func (c *CandleRepository) GetHistoricalCandles(symbol string, limit int) ([]*en
 
 	return candles, nil
 }
+
+func (c *CandleRepository) GetAvailableSymbols() ([]string, error) {
+	var symbols []string
+	err := c.db.Model(&entity.CandleEntity{}).
+		Distinct("symbol").
+		Pluck("symbol", &symbols).
+		Error
+	if err != nil {
+		return nil, err
+	}
+
+	return symbols, nil
+}
