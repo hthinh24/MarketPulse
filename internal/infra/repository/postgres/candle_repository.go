@@ -2,7 +2,9 @@ package postgres
 
 import (
 	"MarketPulse/internal/entity"
+	"MarketPulse/internal/model"
 	"gorm.io/gorm"
+	"time"
 )
 
 type CandleRepository struct {
@@ -35,15 +37,14 @@ func (c *CandleRepository) GetHistoricalCandles(symbol string, limit int) ([]*en
 	return candles, nil
 }
 
-func (c *CandleRepository) GetAvailableSymbols() ([]string, error) {
-	var symbols []string
-	err := c.db.Model(&entity.CandleEntity{}).
-		Distinct("symbol").
-		Pluck("symbol", &symbols).
-		Error
-	if err != nil {
-		return nil, err
-	}
+func (c *CandleRepository) GetSymbolDayVolumeScores() ([]model.SymbolScore, error) {
+	var scores []model.SymbolScore
 
-	return symbols, nil
+	err := c.db.Table(entity.CandleEntity{}.TableName()).
+		Select("symbol, SUM(volume * close) as score").
+		Where("start_time >= ?", time.Now().Add(-24*time.Hour)).
+		Group("symbol").
+		Scan(&scores).Error
+
+	return scores, err
 }

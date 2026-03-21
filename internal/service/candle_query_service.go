@@ -3,6 +3,7 @@ package service
 import (
 	"MarketPulse/internal/dto"
 	"MarketPulse/internal/entity"
+	"MarketPulse/internal/model"
 	"context"
 	"log"
 	"time"
@@ -11,14 +12,14 @@ import (
 type ICandleRepository interface {
 	SaveCandle(candle *entity.CandleEntity) error
 	GetHistoricalCandles(symbol string, limit int) ([]*entity.CandleEntity, error)
-	GetAvailableSymbols() ([]string, error)
+	GetSymbolDayVolumeScores() ([]model.SymbolScore, error)
 }
 
 type ICandleCache interface {
 	GetCandles(ctx context.Context, symbol string, interval string, limit int, endTime int64) ([]*dto.CandleResponse, error)
 	SetCandles(ctx context.Context, symbol string, interval string, candles []*dto.CandleResponse, ttl time.Duration) error
 	GetAvailableSymbols(ctx context.Context) ([]string, error)
-	SetAvailableSymbols(ctx context.Context, symbols []string, ttl time.Duration) error
+	UpdateSymbolRanking(ctx context.Context, scores []model.SymbolScore, expiredTime time.Duration) error
 }
 
 type CandleQueryService struct {
@@ -88,15 +89,14 @@ func (c *CandleQueryService) GetAvailableSymbols(ctx context.Context) ([]string,
 
 	if len(symbols) == 0 {
 		log.Println("cache miss, fetching from repository")
-		symbols, err = c.repository.GetAvailableSymbols()
+
+		symbolScores, err := c.repository.GetSymbolDayVolumeScores()
 		if err != nil {
-			log.Printf("Error fetching available symbols from repository: %v\n", err)
 			return nil, err
 		}
 
-		err = c.candleCache.SetAvailableSymbols(ctx, symbols, 10*time.Minute)
-		if err != nil {
-			log.Printf("Error setting available symbols into cache: %v\n", err)
+		expiredTime := 24 * time.Hour
+		if err := c.candleCache.UpdateSymbolRanking(ctx, symbolScores, expiredTime); err != nil {
 			return nil, err
 		}
 	}

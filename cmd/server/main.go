@@ -5,6 +5,7 @@ import (
 	repository "MarketPulse/internal/infra/repository/postgres"
 	cache "MarketPulse/internal/infra/repository/redis"
 	"MarketPulse/internal/service"
+	"MarketPulse/internal/worker/server"
 	"context"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
@@ -12,6 +13,10 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"log"
+	"net/http"
+	"os/signal"
+	"sync"
+	"syscall"
 	"time"
 )
 
@@ -19,6 +24,9 @@ func main() {
 	// TODO(refactor): Move Init function to separate package and use dependency injection
 	db := InitDB()
 	rdb := initRedisDB()
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	defer func() {
 		if err := rdb.Close(); err != nil {
@@ -33,14 +41,46 @@ func main() {
 
 	InitCacheWarmup(context.Background(), candleRepository, candleCache)
 
+	intervalTime := 5 * time.Minute
+	symbolRankingUpdater := server.NewSymbolRankingUpdater(candleRepository, candleCache, intervalTime)
+
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	go symbolRankingUpdater.Start(ctx, &wg)
+
 	r := gin.Default()
 	r.Use(cors.Default())
 
 	v1 := r.Group("/api/v1")
 	candleController.RegisterRoutes(v1)
 
-	log.Print("Server is running on port 8080")
-	r.Run(":8000")
+	srv := &http.Server{
+		Addr:    ":8000",
+		Handler: r,
+	}
+
+	go func() {
+		srv.ListenAndServe()
+	}()
+
+	<-ctx.Done()
+
+	timeoutContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	doneChan := make(chan struct{})
+	go func() {
+		srv.Shutdown(timeoutContext)
+		wg.Wait()
+		close(doneChan)
+	}()
+
+	select {
+	case <-doneChan:
+		log.Println("Shutdown signal received, waiting for ongoing operations to finish...")
+	case <-timeoutContext.Done():
+		log.Println("Timeout reached, forcing shutdown...")
+	}
 }
 
 func InitDB() *gorm.DB {
@@ -62,25 +102,25 @@ func initRedisDB() *redis.Client {
 	return rdb
 }
 
-func InitCacheWarmup(ctx context.Context, repo service.ICandleRepository, cache service.ICandleCache) {
+func InitCacheWarmup(ctx context.Context, repository service.ICandleRepository, cache service.ICandleCache) {
 	log.Println("Warm up cache, fetching available symbols from repository")
 
-	symbols, err := repo.GetAvailableSymbols()
+	symbolScores, err := repository.GetSymbolDayVolumeScores()
 	if err != nil {
 		log.Printf("Error fetching available symbols from repository: %v\n", err)
 		return
 	}
 
-	if len(symbols) == 0 {
+	if len(symbolScores) == 0 {
 		log.Println("No available symbols found in repository, skipping cache warm up")
 		return
 	}
 
 	expiredTime := 24 * time.Hour
-	err = cache.SetAvailableSymbols(ctx, symbols, expiredTime)
+	err = cache.UpdateSymbolRanking(ctx, symbolScores, expiredTime)
 	if err != nil {
 		log.Printf("Error setting available symbols into cache: %v\n", err)
 	} else {
-		log.Printf("Cache warm up completed, cached %d available symbols for %.0f hours\n", len(symbols), expiredTime.Hours())
+		log.Printf("Cache warm up completed, cached %d available symbols for %.0f hours\n", len(symbolScores), expiredTime.Hours())
 	}
 }

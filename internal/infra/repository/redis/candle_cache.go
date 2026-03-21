@@ -2,6 +2,7 @@ package redis
 
 import (
 	"MarketPulse/internal/dto"
+	"MarketPulse/internal/model"
 	"context"
 	"encoding/json"
 	"errors"
@@ -96,7 +97,8 @@ func (c *CandleCache) SetCandles(ctx context.Context, symbol string, interval st
 }
 
 func (c *CandleCache) GetAvailableSymbols(ctx context.Context) ([]string, error) {
-	val, err := c.redis.SMembers(ctx, symbolKeyPrefix).Result()
+	val, err := c.redis.ZRevRange(ctx, symbolKeyPrefix, 0, -1).Result()
+
 	if errors.Is(err, redis.Nil) || len(val) == 0 {
 		return nil, nil
 	} else if err != nil {
@@ -106,19 +108,23 @@ func (c *CandleCache) GetAvailableSymbols(ctx context.Context) ([]string, error)
 	return val, nil
 }
 
-func (c *CandleCache) SetAvailableSymbols(ctx context.Context, symbols []string, ttl time.Duration) error {
-	if len(symbols) == 0 {
-		return nil
+func (c *CandleCache) UpdateSymbolRanking(ctx context.Context, scores []model.SymbolScore, expiredTime time.Duration) error {
+	tmpKey := symbolKeyPrefix + ":tmp"
+
+	var zItems []*redis.Z
+	for _, s := range scores {
+		zItems = append(zItems, &redis.Z{
+			Score:  s.Score,
+			Member: s.Symbol,
+		})
 	}
 
-	if err := c.redis.SAdd(ctx, symbolKeyPrefix, symbols).Err(); err != nil {
-		log.Println("Failed to add symbols to Redis: " + err.Error())
-		return err
-	}
-	if err := c.redis.Expire(ctx, symbolKeyPrefix, ttl).Err(); err != nil {
-		log.Println("Failed to set TTL for symbols in Redis: " + err.Error())
-		return err
-	}
+	pipe := c.redis.TxPipeline()
+	pipe.Del(ctx, tmpKey)
+	pipe.ZAdd(ctx, tmpKey, zItems...)
+	pipe.Expire(ctx, tmpKey, expiredTime)
+	pipe.Rename(ctx, tmpKey, symbolKeyPrefix)
+	_, err := pipe.Exec(ctx)
 
-	return nil
+	return err
 }
