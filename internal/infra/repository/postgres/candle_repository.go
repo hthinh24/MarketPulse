@@ -23,9 +23,9 @@ func (c *CandleRepository) SaveCandles(candles []entity.CandleEntity) error {
 	return c.db.Create(&candles).Error
 }
 
-func (c *CandleRepository) GetHistoricalCandles(symbol string, limit int) ([]*entity.CandleEntity, error) {
+func (c *CandleRepository) GetNewestCandles(exchange string, symbol string, limit int) ([]*entity.CandleEntity, error) {
 	var candles []*entity.CandleEntity
-	err := c.db.Where("symbol = ?", symbol).
+	err := c.db.Where("exchange = ? AND symbol = ?", exchange, symbol).
 		Order("start_time desc").
 		Limit(limit).
 		Find(&candles).
@@ -37,12 +37,66 @@ func (c *CandleRepository) GetHistoricalCandles(symbol string, limit int) ([]*en
 	return candles, nil
 }
 
-func (c *CandleRepository) GetSymbolDayVolumeScores() ([]model.SymbolScore, error) {
-	var scores []model.SymbolScore
+func (c *CandleRepository) GetHistoricalCandles(exchange string, symbol string, startTime int64, limit int) ([]*entity.CandleEntity, error) {
+	var candles []*entity.CandleEntity
+	if startTime != 0 {
+		err := c.db.Where("exchange = ? AND symbol = ? AND start_time < ?", exchange, symbol, time.UnixMilli(startTime).UTC()).
+			Order("start_time desc").
+			Limit(limit).
+			Find(&candles).
+			Error
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		err := c.db.Where("exchange = ? AND symbol = ?", exchange, symbol).
+			Order("start_time desc").
+			Limit(limit).
+			Find(&candles).
+			Error
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return candles, nil
+}
+
+func (c *CandleRepository) GetActiveExchanges() ([]entity.Exchange, error) {
+	var exchanges []entity.Exchange
+
+	err := c.db.Table(entity.Exchange{}.TableName()).
+		Where("status = ?", "ACTIVE").
+		Find(&exchanges).Error
+	if err != nil {
+		return nil, err
+	}
+
+	return exchanges, nil
+}
+
+// GetExchangeQuoteVolumeScores
+// TODO(refactor): This function should calculate base on other table not on candles_1m
+func (c *CandleRepository) GetExchangeQuoteVolumeScores() ([]model.ExchangeScore, error) {
+	var scores []model.ExchangeScore
+
+	err := c.db.Table(entity.CandleEntity{}.TableName()).
+		Select("exchange, SUM(quote_volume) as total_quote_volume").
+		Where("start_time >= ?", time.Now().Add(-24*time.Hour)).
+		Group("exchange").
+		Scan(&scores).Error
+
+	return scores, err
+}
+
+// GetSymbolDayVolumeScores
+// TODO(refactor): Analytic should calculate base on other table not on candles_1m
+func (c *CandleRepository) GetSymbolDayVolumeScores(exchange string) ([]model.ExchangeSymbolScore, error) {
+	var scores []model.ExchangeSymbolScore
 
 	err := c.db.Table(entity.CandleEntity{}.TableName()).
 		Select("symbol, SUM(volume * close) as score").
-		Where("start_time >= ?", time.Now().Add(-24*time.Hour)).
+		Where("exchange = ? AND start_time >= ?", exchange, time.Now().Add(-24*time.Hour)).
 		Group("symbol").
 		Scan(&scores).Error
 

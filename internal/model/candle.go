@@ -2,12 +2,10 @@ package model
 
 import (
 	"github.com/shopspring/decimal"
-	"sync"
 )
 
 type CandleModel struct {
-	Mu sync.RWMutex
-
+	Exchange  string `json:"exchange"`
 	Symbol    string `json:"symbol"`
 	StartTime int64  `json:"start_time"`
 
@@ -25,8 +23,9 @@ type CandleModel struct {
 	NumberOfTrades int64 `json:"number_of_trades"`
 }
 
-func NewCandleModel(symbol string, startTime int64, intervalMs int64) *CandleModel {
+func NewCandleModel(exchange string, symbol string, startTime int64, intervalMs int64) *CandleModel {
 	return &CandleModel{
+		Exchange:       exchange,
 		Symbol:         symbol,
 		StartTime:      startTime,
 		EndTime:        startTime + intervalMs - 1,
@@ -44,7 +43,7 @@ func NewCandleModel(symbol string, startTime int64, intervalMs int64) *CandleMod
 func (c *CandleModel) Update(
 	price decimal.Decimal,
 	quantity decimal.Decimal,
-	isMarker bool,
+	isTakerBuy bool,
 ) {
 	if c.Open.IsZero() {
 		c.Open = price
@@ -62,7 +61,7 @@ func (c *CandleModel) Update(
 
 	c.Volume = c.Volume.Add(quantity)
 	c.QuoteVolume = c.QuoteVolume.Add(price.Mul(quantity))
-	if !isMarker {
+	if isTakerBuy {
 		c.TakerBuyVolume = c.TakerBuyVolume.Add(quantity)
 	}
 

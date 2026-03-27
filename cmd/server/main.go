@@ -41,7 +41,7 @@ func main() {
 
 	InitCacheWarmup(context.Background(), candleRepository, candleCache)
 
-	intervalTime := 5 * time.Minute
+	intervalTime := 1 * time.Hour
 	symbolRankingUpdater := server.NewSymbolRankingUpdater(candleRepository, candleCache, intervalTime)
 
 	wg := sync.WaitGroup{}
@@ -105,22 +105,36 @@ func initRedisDB() *redis.Client {
 func InitCacheWarmup(ctx context.Context, repository service.ICandleRepository, cache service.ICandleCache) {
 	log.Println("Warm up cache, fetching available symbols from repository")
 
-	symbolScores, err := repository.GetSymbolDayVolumeScores()
+	exchanges, err := repository.GetExchangeQuoteVolumeScores()
 	if err != nil {
-		log.Printf("Error fetching available symbols from repository: %v\n", err)
+		log.Printf("Error fetching active exchanges from repository: %v\n", err)
 		return
 	}
 
-	if len(symbolScores) == 0 {
-		log.Println("No available symbols found in repository, skipping cache warm up")
+	if err := cache.UpdateExchangeRanking(ctx, exchanges, 24*time.Hour); err != nil {
+		log.Printf("Error setting active exchanges into cache: %v\n", err)
 		return
 	}
 
-	expiredTime := 24 * time.Hour
-	err = cache.UpdateSymbolRanking(ctx, symbolScores, expiredTime)
-	if err != nil {
-		log.Printf("Error setting available symbols into cache: %v\n", err)
-	} else {
-		log.Printf("Cache warm up completed, cached %d available symbols for %.0f hours\n", len(symbolScores), expiredTime.Hours())
+	for _, exchange := range exchanges {
+		exchangeCode := exchange.Exchange
+		symbolScores, err := repository.GetSymbolDayVolumeScores(exchangeCode)
+		if err != nil {
+			log.Printf("Error fetching available symbols from repository: %v\n", err)
+			return
+		}
+
+		if len(symbolScores) == 0 {
+			log.Printf("No available symbols found for exchange %s\n", exchangeCode)
+			continue
+		}
+
+		expiredTime := 1 * time.Hour
+		err = cache.UpdateSymbolRanking(ctx, exchangeCode, symbolScores, expiredTime)
+		if err != nil {
+			log.Printf("Error setting available symbols into cache: %v\n", err)
+		}
 	}
+
+	log.Println("Cache warm up completed")
 }

@@ -15,7 +15,7 @@ type ICandleRepository interface {
 }
 
 type ICandleCache interface {
-	SetCandles(ctx context.Context, symbol string, interval string, candles []*dto.CandleResponse, ttl time.Duration) error
+	SetCandles(ctx context.Context, exchange string, symbol string, interval string, candles []*dto.CandleResponse, ttl time.Duration) error
 }
 
 type DBIngestor struct {
@@ -57,14 +57,14 @@ func (d *DBIngestor) Start(ctx context.Context, wg *sync.WaitGroup) {
 
 		case candle, ok := <-d.saveChan:
 			if !ok {
-				d.flush(batch)
+				batch = d.flush(batch)
 				return
 			}
 
 			batch = append(batch, candle)
 
 			if len(batch) >= d.batchSize {
-				d.flush(batch)
+				batch = d.flush(batch)
 				flushTicker.Reset(5 * time.Second)
 			}
 		}
@@ -81,13 +81,19 @@ func (d *DBIngestor) flush(batch []entity.CandleEntity) []entity.CandleEntity {
 		// TODO: Implement retry logic or move to a dead-letter queue for failed saves
 	}
 
-	for _, candle := range batch {
-		candleResponse := createCandleResponse(&candle)
-		err := d.candleCache.SetCandles(context.Background(), candle.Symbol, "1m", []*dto.CandleResponse{candleResponse}, 5*time.Minute)
-		if err != nil {
-			log.Printf("Failed to update cache for %s at %d: %v\n", candle.Symbol, candle.StartTime.UnixMilli(), err)
+	cacheBatch := make([]entity.CandleEntity, len(batch))
+	copy(cacheBatch, batch)
+
+	go func(candles []entity.CandleEntity) {
+		ttl := 5 * time.Minute
+		for _, candle := range candles {
+			candleResponse := createCandleResponse(&candle)
+			err := d.candleCache.SetCandles(context.Background(), candle.Exchange, candle.Symbol, "1m", []*dto.CandleResponse{candleResponse}, ttl)
+			if err != nil {
+				log.Printf("Failed to update cache for %s at %d: %v\n", candle.Symbol, candle.StartTime.UnixMilli(), err)
+			}
 		}
-	}
+	}(cacheBatch)
 
 	log.Printf("Flushed batch of %d candles to database successfully\n", len(batch))
 
@@ -96,7 +102,7 @@ func (d *DBIngestor) flush(batch []entity.CandleEntity) []entity.CandleEntity {
 }
 
 func (d *DBIngestor) cleanUp() {
-	close(d.saveChan)
+	//close(d.saveChan)
 }
 
 func createCandleResponse(candle *entity.CandleEntity) *dto.CandleResponse {

@@ -7,6 +7,7 @@ import (
 )
 
 type CandleEntity struct {
+	Exchange  string    `gorm:"column:exchange;type:varchar(20);not null"`
 	Symbol    string    `gorm:"column:symbol;type:varchar(20);uniqueIndex:idx_symbol_time,priority:1;not null"`
 	StartTime time.Time `gorm:"column:start_time;uniqueIndex:idx_symbol_time,priority:2;not null"`
 
@@ -25,11 +26,12 @@ type CandleEntity struct {
 }
 
 func (CandleEntity) TableName() string {
-	return "candles"
+	return "candles_1m"
 }
 
 func NewCandleEntity(candle *model.CandleModel) *CandleEntity {
 	return &CandleEntity{
+		Exchange:       candle.Exchange,
 		Symbol:         candle.Symbol,
 		StartTime:      time.UnixMilli(candle.StartTime).UTC(),
 		EndTime:        time.UnixMilli(candle.EndTime).UTC(),

@@ -1,7 +1,7 @@
 package ingestor
 
 import (
-	"MarketPulse/internal/dto"
+	"MarketPulse/internal/model"
 	"context"
 	"encoding/json"
 	segmentio "github.com/segmentio/kafka-go"
@@ -9,22 +9,22 @@ import (
 	"sync/atomic"
 )
 
-type WorkerPool struct {
+type TickDataProducerManager struct {
 	numWorkers int
 }
 
-type Worker struct {
+type TickDataProducer struct {
 	ID          int
 	kafkaWriter *segmentio.Writer
-	tradeChan   <-chan dto.Trade
+	tradeChan   <-chan model.TickModel
 	counter     *uint64
 }
 
-func NewWorkerPool(numWorkers int) *WorkerPool {
-	return &WorkerPool{numWorkers: numWorkers}
+func NewTickDataProducerManager(numWorkers int) *TickDataProducerManager {
+	return &TickDataProducerManager{numWorkers: numWorkers}
 }
 
-func (p *WorkerPool) Start(ctx context.Context, wg *sync.WaitGroup, tradeChan <-chan dto.Trade, kafkaWriter *segmentio.Writer, counter *uint64) {
+func (p *TickDataProducerManager) Start(ctx context.Context, wg *sync.WaitGroup, tradeChan <-chan model.TickModel, kafkaWriter *segmentio.Writer, counter *uint64) {
 	defer wg.Done()
 
 	poolWg := sync.WaitGroup{}
@@ -32,7 +32,7 @@ func (p *WorkerPool) Start(ctx context.Context, wg *sync.WaitGroup, tradeChan <-
 	for i := 0; i < p.numWorkers; i++ {
 		poolWg.Add(1)
 
-		worker := &Worker{
+		worker := &TickDataProducer{
 			ID:          i,
 			kafkaWriter: kafkaWriter,
 			tradeChan:   tradeChan,
@@ -45,7 +45,7 @@ func (p *WorkerPool) Start(ctx context.Context, wg *sync.WaitGroup, tradeChan <-
 	poolWg.Wait()
 }
 
-func (p *Worker) Start(ctx context.Context, wg *sync.WaitGroup) {
+func (p *TickDataProducer) Start(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
 	for trade := range p.tradeChan {
 		msgBytes, _ := json.Marshal(trade)

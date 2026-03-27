@@ -1,35 +1,32 @@
-package binance
+package bybit
 
 import (
 	"encoding/json"
 	"net/http"
-	"strings"
 )
 
 func GetActiveUSDTStreams() ([]string, error) {
-	resp, err := http.Get("https://api.binance.com/api/v3/exchangeInfo")
+	resp, err := http.Get("https://api.bybit.com/v5/market/instruments-info?category=spot")
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
-	var info BinanceExchangeInfo
+	var info BybitInstrumentsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
 		return nil, err
 	}
 
 	var streams []string
-	for _, s := range info.Symbols {
-		if s.QuoteAsset == "USDT" && s.Status == "TRADING" {
-			// Stream coin format: <symbol>@trade
-			streamName := strings.ToLower(s.Symbol) + "@trade"
-			streams = append(streams, streamName)
+	for _, s := range info.Result.List {
+		if s.QuoteCoin == "USDT" && s.Status == "Trading" {
+			// Bybit Format "publicTrade.<symbol>"
+			streams = append(streams, "publicTrade."+s.Symbol)
 		}
 	}
 	return streams, nil
 }
 
-// ChunkSlice helper function to split a slice to many chunks
 func ChunkSlice(slice []string, chunkSize int) [][]string {
 	var chunks [][]string
 	for i := 0; i < len(slice); i += chunkSize {

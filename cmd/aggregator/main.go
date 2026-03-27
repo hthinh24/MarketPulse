@@ -5,9 +5,10 @@ import (
 	"MarketPulse/internal/entity"
 	repository "MarketPulse/internal/infra/repository/postgres"
 	cache "MarketPulse/internal/infra/repository/redis"
-	"MarketPulse/internal/service"
 	"MarketPulse/internal/worker"
 	"MarketPulse/internal/worker/aggregator"
+	"MarketPulse/internal/worker/dbsync"
+	"MarketPulse/internal/worker/dbsync/adapter"
 	"context"
 	"github.com/go-redis/redis/v8"
 	"github.com/segmentio/kafka-go"
@@ -15,6 +16,7 @@ import (
 	"gorm.io/gorm"
 	"log"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -35,29 +37,62 @@ func main() {
 
 	batchSize := 400
 	saveChanSize := 5000
-	publishChanSize := 10000
+	broadcastChanSize := 10000
+	broadcastChan := make(chan dto.CandleUpdatedEvent, broadcastChanSize)
 
 	saveChan := make(chan entity.CandleEntity, saveChanSize)
-	publishChan := make(chan dto.CandleUpdatedEvent, publishChanSize)
-
-	candleService := service.NewCandleAggregateService(saveChan, publishChan)
-	candleUpdatePublisher := aggregator.NewCandleUpdatePublisher(publishChan, rdb)
-
-	readerConfig := InitKafkaReaderConfig("localhost:9092", "market_trades", "vibe-aggregator-group")
 
 	candleRepository := repository.NewCandleRepository(db)
 	candleCache := cache.NewCandleCache(rdb)
 	dbIngestor := worker.NewDBIngestor(saveChan, candleCache, candleRepository, batchSize)
 
-	tickDataReaderManager := aggregator.NewTickDataReaderManager(4, *readerConfig, candleService)
+	consumerGroup := "aggregator-group"
+	kafkaTopicPrefix := "market_trades"
+	binanceExchange := "BINANCE"
+	okxExchange := "OKX"
+	bybitExchange := "BYBIT"
+
+	binanceReader := kafka.NewReader(*InitKafkaReaderConfig("localhost:9092", kafkaTopicPrefix+"_"+strings.ToLower(binanceExchange), consumerGroup))
+	okxReader := kafka.NewReader(*InitKafkaReaderConfig("localhost:9092", kafkaTopicPrefix+"_"+strings.ToLower(okxExchange), consumerGroup))
+	bybitReader := kafka.NewReader(*InitKafkaReaderConfig("localhost:9092", kafkaTopicPrefix+"_"+strings.ToLower(bybitExchange), consumerGroup))
+
+	workerBuffer := 100
+	binanceDispatcher := aggregator.NewDispatcher(binanceExchange, binanceReader, workerBuffer, saveChan, broadcastChan)
+	okxDispatcher := aggregator.NewDispatcher(okxExchange, okxReader, workerBuffer, saveChan, broadcastChan)
+	bybitDispatcher := aggregator.NewDispatcher(bybitExchange, bybitReader, workerBuffer, saveChan, broadcastChan)
+
+	candlePublisher := aggregator.NewCandleUpdatePublisher(broadcastChan, rdb)
+
+	binanceUrl := "https://api.binance.com/api/v3/exchangeInfo"
+	okxUrl := "https://www.okx.com/api/v5/public/instruments?instType=SPOT"
+	bybitUrl := "https://api.bybit.com/v5/market/instruments-info?category=spot"
+
+	binanceAdapter := adapter.NewBinanceAdapter(binanceExchange, binanceUrl)
+	okxAdapter := adapter.NewOKXAdapter(okxExchange, okxUrl)
+	bybitAdapter := adapter.NewBybitAdapter(bybitExchange, bybitUrl)
+
+	exchangeSymbolSyncer := dbsync.NewExchangeSymbolSyncer(
+		db,
+		[]dbsync.IExchangeAPIAdapter{binanceAdapter, okxAdapter, bybitAdapter},
+	)
 
 	wg := sync.WaitGroup{}
+
+	wg.Add(1)
+	go candlePublisher.Start(ctx, &wg)
+
 	wg.Add(1)
 	go dbIngestor.Start(ctx, &wg)
+
 	wg.Add(1)
-	go candleUpdatePublisher.Start(ctx, &wg)
+	go binanceDispatcher.Start(ctx, &wg)
 	wg.Add(1)
-	go tickDataReaderManager.Start(ctx, &wg)
+	go okxDispatcher.Start(ctx, &wg)
+	wg.Add(1)
+	go bybitDispatcher.Start(ctx, &wg)
+
+	wg.Add(1)
+	go exchangeSymbolSyncer.Start(ctx, &wg)
 
 	<-ctx.Done()
 

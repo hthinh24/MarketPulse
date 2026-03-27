@@ -12,8 +12,8 @@ import (
 	"time"
 )
 
-var candleKeyPrefix = "marketpulse:candles:"
-var symbolKeyPrefix = "marketpulse:symbols"
+var keyPrefix = "marketpulse:"
+var maxCandleCacheSize = 1000
 
 type CandleCache struct {
 	redis *redis.Client
@@ -28,9 +28,8 @@ func NewCandleCache(redis *redis.Client) *CandleCache {
  * Get candles from cache from newest to oldest, with endTime as the upper bound of the timestamp.
  * If endTime is 0, it will get the newest candles.
  */
-// TODO(Refactor): Add ZREMRANGEBYSCORE to remove old candles
-func (c *CandleCache) GetCandles(ctx context.Context, symbol string, interval string, limit int, endTime int64) ([]*dto.CandleResponse, error) {
-	key := candleKeyPrefix + interval + ":" + symbol
+func (c *CandleCache) GetCandles(ctx context.Context, exchange string, symbol string, interval string, limit int, endTime int64) ([]*dto.CandleResponse, error) {
+	key := keyPrefix + exchange + ":candles:" + symbol + ":" + interval
 
 	maxScore := "+inf"
 	if endTime > 0 {
@@ -64,8 +63,8 @@ func (c *CandleCache) GetCandles(ctx context.Context, symbol string, interval st
 	return candles, nil
 }
 
-func (c *CandleCache) SetCandles(ctx context.Context, symbol string, interval string, candles []*dto.CandleResponse, ttl time.Duration) error {
-	key := candleKeyPrefix + interval + ":" + symbol
+func (c *CandleCache) SetCandles(ctx context.Context, exchange string, symbol string, interval string, candles []*dto.CandleResponse, ttl time.Duration) error {
+	key := keyPrefix + exchange + ":candles:" + symbol + ":" + interval
 
 	zItems := make([]*redis.Z, 0, len(candles))
 	for _, candle := range candles {
@@ -93,11 +92,52 @@ func (c *CandleCache) SetCandles(ctx context.Context, symbol string, interval st
 		return err
 	}
 
+	stop := -int64(maxCandleCacheSize) - 1
+	if err := c.redis.ZRemRangeByRank(ctx, key, 0, stop).Err(); err != nil {
+		log.Println("Failed to remove old candles from Redis: " + err.Error())
+		return err
+	}
+
 	return nil
 }
 
-func (c *CandleCache) GetAvailableSymbols(ctx context.Context) ([]string, error) {
-	val, err := c.redis.ZRevRange(ctx, symbolKeyPrefix, 0, -1).Result()
+func (c *CandleCache) GetActiveExchanges(ctx context.Context) ([]string, error) {
+	key := keyPrefix + "rank:exchanges"
+
+	val, err := c.redis.ZRevRange(ctx, key, 0, -1).Result()
+	if errors.Is(err, redis.Nil) || len(val) == 0 {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+
+	return val, nil
+}
+
+func (c *CandleCache) UpdateExchangeRanking(ctx context.Context, scores []model.ExchangeScore, ttl time.Duration) error {
+	key := keyPrefix + "rank:exchanges"
+	tmpKey := key + ":tmp"
+
+	var zItems []*redis.Z
+	for _, s := range scores {
+		zItems = append(zItems, &redis.Z{
+			Score:  s.TotalQuoteVolume,
+			Member: s.Exchange,
+		})
+	}
+
+	pipe := c.redis.TxPipeline()
+	pipe.Del(ctx, tmpKey)
+	pipe.ZAdd(ctx, tmpKey, zItems...)
+	pipe.Expire(ctx, tmpKey, ttl)
+	pipe.Rename(ctx, tmpKey, key)
+	_, err := pipe.Exec(ctx)
+	return err
+}
+
+func (c *CandleCache) GetAvailableSymbols(ctx context.Context, exchange string) ([]string, error) {
+	key := keyPrefix + "rank:" + exchange + ":symbols"
+	val, err := c.redis.ZRevRange(ctx, key, 0, -1).Result()
 
 	if errors.Is(err, redis.Nil) || len(val) == 0 {
 		return nil, nil
@@ -108,8 +148,9 @@ func (c *CandleCache) GetAvailableSymbols(ctx context.Context) ([]string, error)
 	return val, nil
 }
 
-func (c *CandleCache) UpdateSymbolRanking(ctx context.Context, scores []model.SymbolScore, expiredTime time.Duration) error {
-	tmpKey := symbolKeyPrefix + ":tmp"
+func (c *CandleCache) UpdateSymbolRanking(ctx context.Context, exchange string, scores []model.ExchangeSymbolScore, expiredTime time.Duration) error {
+	key := keyPrefix + "rank:" + exchange + ":symbols"
+	tmpKey := key + ":tmp"
 
 	var zItems []*redis.Z
 	for _, s := range scores {
@@ -123,8 +164,26 @@ func (c *CandleCache) UpdateSymbolRanking(ctx context.Context, scores []model.Sy
 	pipe.Del(ctx, tmpKey)
 	pipe.ZAdd(ctx, tmpKey, zItems...)
 	pipe.Expire(ctx, tmpKey, expiredTime)
-	pipe.Rename(ctx, tmpKey, symbolKeyPrefix)
+	pipe.Rename(ctx, tmpKey, key)
 	_, err := pipe.Exec(ctx)
 
+	log.Printf("Updated symbol ranking for exchange %s on Redis\n", exchange)
+
 	return err
+}
+
+func (c *CandleCache) GetMinStartTime(ctx context.Context, exchange string, symbol string, interval string) int64 {
+	key := keyPrefix + exchange + ":candles:" + symbol + ":" + interval
+
+	val, err := c.redis.ZRangeWithScores(ctx, key, 0, 0).Result()
+	if errors.Is(err, redis.Nil) || len(val) == 0 {
+		return 0
+	}
+
+	if err != nil {
+		log.Println("Failed to get min start time from Redis: " + err.Error())
+		return 0
+	}
+
+	return int64(val[0].Score)
 }
