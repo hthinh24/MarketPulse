@@ -5,7 +5,7 @@ import "MarketPulse/internal/model"
 type GetCandlesRequest struct {
 	Exchange    string `form:"exchange" binding:"required"`
 	Symbol      string `form:"symbol" binding:"required"`
-	Interval    string `form:"interval" binding:"required,oneof=1m 15m 1h 1d"`
+	Timeframe   string `form:"timeframe" binding:"required,oneof=1m 5m 15m 1h 1d 1w 1M"`
 	Limit       int    `form:"limit" binding:"omitempty,min=1,max=1000"`
 	EndTime     int64  `form:"endTime" binding:"omitempty"`
 	ByPassCache bool   `form:"byPassCache" binding:"omitempty"`

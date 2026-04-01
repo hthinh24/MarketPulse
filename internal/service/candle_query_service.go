@@ -11,8 +11,8 @@ import (
 
 type ICandleRepository interface {
 	SaveCandle(candle *entity.CandleEntity) error
-	GetNewestCandles(exchange string, symbol string, limit int) ([]*entity.CandleEntity, error)
-	GetHistoricalCandles(exchange string, symbol string, endTime int64, limit int) ([]*entity.CandleEntity, error)
+	GetNewestCandles(exchange string, symbol string, timeframe string, limit int) ([]*entity.CandleEntity, error)
+	GetHistoricalCandles(exchange string, symbol string, timeframe string, endTime int64, limit int) ([]*entity.CandleEntity, error)
 	GetActiveExchanges() ([]entity.Exchange, error)
 	GetExchangeQuoteVolumeScores() ([]model.ExchangeScore, error)
 	GetSymbolDayVolumeScores(exchange string) ([]model.ExchangeSymbolScore, error)
@@ -41,12 +41,16 @@ func NewCandleQueryService(candleCache ICandleCache, repository ICandleRepositor
 }
 
 func (m *CandleQueryService) GetHistoricalCandles(ctx context.Context, request *dto.GetCandlesRequest) (*dto.CandleHistoryResponse, error) {
-	minHotCandleStartTime := m.candleCache.GetMinStartTime(ctx, request.Exchange, request.Symbol, request.Interval)
+	minHotCandleStartTime := m.candleCache.GetMinStartTime(ctx, request.Exchange, request.Symbol, request.Timeframe)
+
+	log.Print("request end time: ", request.EndTime, " min hot candle start time: ", minHotCandleStartTime)
+	log.Print("is cold data: ", request.EndTime < minHotCandleStartTime)
 
 	isColdData := request.EndTime != 0 && minHotCandleStartTime != 0 && request.EndTime < minHotCandleStartTime
 	if isColdData {
 		log.Printf("Fetching purely COLD data for %s before %d", request.Symbol, request.EndTime)
-		candles, err := m.fetchFromRepository(request.Exchange, request.Symbol, request.EndTime, request.Limit)
+		//candles, err := m.fetchFromRepository(request.Exchange, request.Symbol, request.Timeframe, request.EndTime, request.Limit)
+		candles, err := m.fetchAndCache(ctx, request)
 		if err != nil {
 			log.Printf("Error fetching candles from DB: %v", err)
 			return nil, err
@@ -54,9 +58,9 @@ func (m *CandleQueryService) GetHistoricalCandles(ctx context.Context, request *
 		return createCandleHistoryResponse(request, candles, isColdData), nil
 	}
 
-	candleResponses, err := m.candleCache.GetCandles(ctx, request.Exchange, request.Symbol, request.Interval, request.Limit, request.EndTime)
+	candleResponses, err := m.candleCache.GetCandles(ctx, request.Exchange, request.Symbol, request.Timeframe, request.Limit, request.EndTime)
 	if err != nil || len(candleResponses) == 0 {
-		log.Printf("Cache miss/empty for %s, fetching from DB", request.Symbol)
+		log.Printf("Cache miss for exchange: %s symbol: %s in timeframe: %s startTime: %d, fetching from repository\n", request.Exchange, request.Symbol, request.Timeframe, request.EndTime)
 		candles, err := m.fetchAndCache(ctx, request)
 		if err != nil {
 			return nil, err
@@ -81,7 +85,7 @@ func (m *CandleQueryService) GetHistoricalCandles(ctx context.Context, request *
 	isCacheSlipped := oldestCandle.OpenTime == minHotCandleStartTime
 	if isCacheSlipped {
 		newEndTime := oldestCandle.OpenTime
-		olderCandles, err := m.fetchFromRepository(request.Exchange, request.Symbol, newEndTime, request.Limit-len(candleResponses))
+		olderCandles, err := m.fetchFromRepository(request.Exchange, request.Symbol, request.Timeframe, newEndTime, request.Limit-len(candleResponses))
 		if err != nil {
 			log.Printf("Error fetching slipped candles from DB: %v", err)
 			return createCandleHistoryResponse(request, candleResponses, false), nil
@@ -93,12 +97,19 @@ func (m *CandleQueryService) GetHistoricalCandles(ctx context.Context, request *
 }
 
 func createCandleHistoryResponse(request *dto.GetCandlesRequest, candles []*dto.CandleResponse, isCoolData bool) *dto.CandleHistoryResponse {
+	hasMore := len(candles) == request.Limit
+	nextEndTime := int64(0)
+
+	if hasMore {
+		nextEndTime = candles[len(candles)-1].OpenTime
+	}
+
 	return &dto.CandleHistoryResponse{
 		Exchange:    request.Exchange,
 		Symbol:      request.Symbol,
-		Interval:    request.Interval,
-		HasMore:     len(candles) == request.Limit,
-		NextEndTime: candles[len(candles)-1].OpenTime,
+		Interval:    request.Timeframe,
+		HasMore:     hasMore,
+		NextEndTime: nextEndTime,
 		IsColdData:  isCoolData,
 		Candles:     candles,
 	}
@@ -158,14 +169,16 @@ func (c *CandleQueryService) GetAvailableSymbols(ctx context.Context, exchange s
 	return symbols, nil
 }
 
-func (m *CandleQueryService) fetchFromRepository(exchange, symbol string, endTime int64, limit int) ([]*dto.CandleResponse, error) {
+func (m *CandleQueryService) fetchFromRepository(exchange, symbol, timeframe string, endTime int64, limit int) ([]*dto.CandleResponse, error) {
 	var entities []*entity.CandleEntity
 	var err error
 
+	log.Printf("EndTime: %d, MinHotCandleStartTime: %d", endTime, m.candleCache.GetMinStartTime(context.Background(), exchange, symbol, "1m"))
+
 	if endTime == 0 {
-		entities, err = m.repository.GetNewestCandles(exchange, symbol, limit)
+		entities, err = m.repository.GetNewestCandles(exchange, symbol, timeframe, limit)
 	} else {
-		entities, err = m.repository.GetHistoricalCandles(exchange, symbol, endTime, limit)
+		entities, err = m.repository.GetHistoricalCandles(exchange, symbol, timeframe, endTime, limit)
 	}
 
 	if err != nil {
@@ -176,15 +189,17 @@ func (m *CandleQueryService) fetchFromRepository(exchange, symbol string, endTim
 	for i, candle := range entities {
 		responses[i] = m.createCandleResponse(candle)
 	}
+
+	log.Printf("Fetched %d candles from repository for exchange: %s symbol: %s in timeframe: %s\n", len(responses), exchange, symbol, timeframe)
 	return responses, nil
 }
 
 func (m *CandleQueryService) fetchAndCache(ctx context.Context, req *dto.GetCandlesRequest) ([]*dto.CandleResponse, error) {
-	responses, err := m.fetchFromRepository(req.Exchange, req.Symbol, req.EndTime, req.Limit)
+	responses, err := m.fetchFromRepository(req.Exchange, req.Symbol, req.Timeframe, req.EndTime, req.Limit)
 	if err != nil || len(responses) == 0 {
 		return responses, err
 	}
-	err = m.candleCache.SetCandles(ctx, req.Exchange, req.Symbol, req.Interval, responses, 5*time.Minute)
+	err = m.candleCache.SetCandles(ctx, req.Exchange, req.Symbol, req.Timeframe, responses, 5*time.Minute)
 	if err != nil {
 		log.Printf("Failed to warm up cache: %v", err)
 	}

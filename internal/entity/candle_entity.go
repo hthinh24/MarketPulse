@@ -3,6 +3,7 @@ package entity
 import (
 	"MarketPulse/internal/model"
 	"github.com/shopspring/decimal"
+	"log"
 	"time"
 )
 
@@ -27,6 +28,18 @@ type CandleEntity struct {
 
 func (CandleEntity) TableName() string {
 	return "candles_1m"
+}
+
+func (CandleEntity) TableNameWithTimeframe(timeframe string) string {
+	switch timeframe {
+	case "1m", "5m", "15m", "1h", "1d", "1w":
+		return "candles_" + timeframe
+	case "1M":
+		return "candles_1mo"
+	default:
+		log.Printf("Unsupported timeframe: %s, defaulting to 1m", timeframe)
+		return "candles_1m"
+	}
 }
 
 func NewCandleEntity(candle *model.CandleModel) *CandleEntity {

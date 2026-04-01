@@ -57,9 +57,18 @@ func main() {
 	bybitReader := kafka.NewReader(*InitKafkaReaderConfig("localhost:9092", kafkaTopicPrefix+"_"+strings.ToLower(bybitExchange), consumerGroup))
 
 	workerBuffer := 100
-	binanceDispatcher := aggregator.NewDispatcher(binanceExchange, binanceReader, workerBuffer, saveChan, broadcastChan)
-	okxDispatcher := aggregator.NewDispatcher(okxExchange, okxReader, workerBuffer, saveChan, broadcastChan)
-	bybitDispatcher := aggregator.NewDispatcher(bybitExchange, bybitReader, workerBuffer, saveChan, broadcastChan)
+	timeframeConfigs := []aggregator.TimeframeConfig{
+		{Timeframe: "1m", IntervalMs: 60 * 1000, PublishRate: 250 * time.Millisecond},
+		{Timeframe: "5m", IntervalMs: 300 * 1000, PublishRate: 500 * time.Millisecond},
+		{Timeframe: "15m", IntervalMs: 900 * 1000, PublishRate: 1 * time.Second},
+		{Timeframe: "1h", IntervalMs: 3600 * 1000, PublishRate: 2 * time.Second},
+		{Timeframe: "1d", IntervalMs: 86400 * 1000, PublishRate: 5 * time.Second},
+		{Timeframe: "1w", IntervalMs: 604800 * 1000, PublishRate: 10 * time.Second},
+		{Timeframe: "1M", IntervalMs: 2592000 * 1000, PublishRate: 30 * time.Second},
+	}
+	binanceDispatcher := aggregator.NewDispatcher(binanceExchange, binanceReader, workerBuffer, timeframeConfigs, saveChan, broadcastChan)
+	okxDispatcher := aggregator.NewDispatcher(okxExchange, okxReader, workerBuffer, timeframeConfigs, saveChan, broadcastChan)
+	bybitDispatcher := aggregator.NewDispatcher(bybitExchange, bybitReader, workerBuffer, timeframeConfigs, saveChan, broadcastChan)
 
 	candlePublisher := aggregator.NewCandleUpdatePublisher(broadcastChan, rdb)
 

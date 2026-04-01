@@ -80,3 +80,16 @@ func (c *CandleModel) ResetForNextMinute(newStartTime int64, intervalMs int64) {
 	c.TakerBuyVolume = decimal.Zero
 	c.NumberOfTrades = 0
 }
+
+func (c *CandleModel) ResetForNextInterval(time int64, intervalMs int64) {
+	c.StartTime = time
+	c.EndTime = time + intervalMs - 1
+	c.Open = decimal.Zero
+	c.High = decimal.Zero
+	c.Low = decimal.Zero
+	c.Close = decimal.Zero
+	c.Volume = decimal.Zero
+	c.QuoteVolume = decimal.Zero
+	c.TakerBuyVolume = decimal.Zero
+	c.NumberOfTrades = 0
+}

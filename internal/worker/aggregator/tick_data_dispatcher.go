@@ -8,28 +8,37 @@ import (
 	"encoding/json"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/segmentio/kafka-go"
 )
 
-type Dispatcher struct {
-	exchangeName string
-	kafkaReader  *kafka.Reader
-	workers      map[string]chan model.TickModel
-	workerBuffer int
-	mu           sync.RWMutex
-	dbSaveChan   chan<- entity.CandleEntity
-	publishChan  chan dto.CandleUpdatedEvent
+type TimeframeConfig struct {
+	Timeframe   string
+	IntervalMs  int64
+	PublishRate time.Duration
 }
 
-func NewDispatcher(exchange string, reader *kafka.Reader, workerBuffer int, dbChan chan<- entity.CandleEntity, publishChan chan dto.CandleUpdatedEvent) *Dispatcher {
+type Dispatcher struct {
+	exchangeName     string
+	kafkaReader      *kafka.Reader
+	workers          map[string]chan model.TickModel
+	workerBuffer     int
+	timeframeConfigs []TimeframeConfig
+	mu               sync.RWMutex
+	dbSaveChan       chan<- entity.CandleEntity
+	publishChan      chan dto.CandleUpdatedEvent
+}
+
+func NewDispatcher(exchange string, reader *kafka.Reader, workerBuffer int, timeframeConfigs []TimeframeConfig, dbChan chan<- entity.CandleEntity, publishChan chan dto.CandleUpdatedEvent) *Dispatcher {
 	return &Dispatcher{
-		exchangeName: exchange,
-		kafkaReader:  reader,
-		workers:      make(map[string]chan model.TickModel),
-		workerBuffer: workerBuffer,
-		dbSaveChan:   dbChan,
-		publishChan:  publishChan,
+		exchangeName:     exchange,
+		kafkaReader:      reader,
+		workers:          make(map[string]chan model.TickModel),
+		workerBuffer:     workerBuffer,
+		timeframeConfigs: timeframeConfigs,
+		dbSaveChan:       dbChan,
+		publishChan:      publishChan,
 	}
 }
 
@@ -67,7 +76,8 @@ func (d *Dispatcher) Start(ctx context.Context, wg *sync.WaitGroup) {
 					workerChan = make(chan model.TickModel, d.workerBuffer)
 					d.workers[tick.Symbol] = workerChan
 
-					go StartTickDataHandler(d.exchangeName, tick.Symbol, workerChan, d.dbSaveChan, d.publishChan)
+					tickDataHandler := NewTickDataHandler(d.exchangeName, tick.Symbol, d.timeframeConfigs, workerChan, d.dbSaveChan, d.publishChan)
+					go tickDataHandler.Start()
 				}
 				d.mu.Unlock()
 			}

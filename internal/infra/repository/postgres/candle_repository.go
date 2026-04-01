@@ -23,9 +23,11 @@ func (c *CandleRepository) SaveCandles(candles []entity.CandleEntity) error {
 	return c.db.Create(&candles).Error
 }
 
-func (c *CandleRepository) GetNewestCandles(exchange string, symbol string, limit int) ([]*entity.CandleEntity, error) {
+func (c *CandleRepository) GetNewestCandles(exchange string, symbol string, timeframe string, limit int) ([]*entity.CandleEntity, error) {
 	var candles []*entity.CandleEntity
-	err := c.db.Where("exchange = ? AND symbol = ?", exchange, symbol).
+
+	err := c.db.Table(entity.CandleEntity{}.TableNameWithTimeframe(timeframe)).
+		Where("exchange = ? AND symbol = ?", exchange, symbol).
 		Order("start_time desc").
 		Limit(limit).
 		Find(&candles).
@@ -37,10 +39,11 @@ func (c *CandleRepository) GetNewestCandles(exchange string, symbol string, limi
 	return candles, nil
 }
 
-func (c *CandleRepository) GetHistoricalCandles(exchange string, symbol string, startTime int64, limit int) ([]*entity.CandleEntity, error) {
+func (c *CandleRepository) GetHistoricalCandles(exchange string, symbol string, timeframe string, startTime int64, limit int) ([]*entity.CandleEntity, error) {
 	var candles []*entity.CandleEntity
 	if startTime != 0 {
-		err := c.db.Where("exchange = ? AND symbol = ? AND start_time < ?", exchange, symbol, time.UnixMilli(startTime).UTC()).
+		err := c.db.Table(entity.CandleEntity{}.TableNameWithTimeframe(timeframe)).
+			Where("exchange = ? AND symbol = ? AND start_time < ?", exchange, symbol, time.UnixMilli(startTime).UTC()).
 			Order("start_time desc").
 			Limit(limit).
 			Find(&candles).
@@ -49,14 +52,7 @@ func (c *CandleRepository) GetHistoricalCandles(exchange string, symbol string, 
 			return nil, err
 		}
 	} else {
-		err := c.db.Where("exchange = ? AND symbol = ?", exchange, symbol).
-			Order("start_time desc").
-			Limit(limit).
-			Find(&candles).
-			Error
-		if err != nil {
-			return nil, err
-		}
+		return c.GetNewestCandles(exchange, symbol, timeframe, limit)
 	}
 
 	return candles, nil
@@ -86,6 +82,16 @@ func (c *CandleRepository) GetExchangeQuoteVolumeScores() ([]model.ExchangeScore
 		Group("exchange").
 		Scan(&scores).Error
 
+	// TODO(refactor): Cuz server not always running, so we need fallback logic to calculate score
+	// Currently will calculate base on near 7 days data
+	if len(scores) == 0 {
+		err = c.db.Table(entity.CandleEntity{}.TableName()).
+			Select("exchange, SUM(quote_volume) as total_quote_volume").
+			Where("start_time >= ?", time.Now().Add(-7*24*time.Hour)).
+			Group("exchange").
+			Scan(&scores).Error
+	}
+
 	return scores, err
 }
 
@@ -100,5 +106,15 @@ func (c *CandleRepository) GetSymbolDayVolumeScores(exchange string) ([]model.Ex
 		Group("symbol").
 		Scan(&scores).Error
 
+	// TODO(refactor): Cuz server not always running, so we need fallback logic to calculate score
+	// Currently will calculate base on near 7 days data
+	if len(scores) == 0 {
+		err = c.db.Table(entity.CandleEntity{}.TableName()).
+			Select("symbol, SUM(volume * close) as score").
+			Where("exchange = ? AND start_time >= ?", exchange, time.Now().Add(-7*24*time.Hour)).
+			Group("symbol").
+			Scan(&scores).Error
+	}
+	
 	return scores, err
 }

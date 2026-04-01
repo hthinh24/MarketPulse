@@ -153,8 +153,8 @@ func main() {
 	go func() {
 		pollerWg.Wait()
 
-		//close(binanceTradeChan)
-		//close(okxTradeChan)
+		close(binanceTradeChan)
+		close(okxTradeChan)
 		close(bybitTradeChan)
 
 		writerWg.Wait()

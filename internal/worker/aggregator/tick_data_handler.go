@@ -6,43 +6,96 @@ import (
 	"MarketPulse/internal/model"
 	"fmt"
 	"github.com/shopspring/decimal"
+	"time"
 )
 
-var candleType = "1m"
+var candleEntityTimeframe = "1m"
 var channelPrefix = "marketpulse:"
 var channelFormat = channelPrefix + "candles:%s:%s:%s"
 
-func StartTickDataHandler(exchange string, symbol string, inbox <-chan model.TickModel, saveChan chan<- entity.CandleEntity, broadcastChan chan<- dto.CandleUpdatedEvent) {
-	var candle *model.CandleModel
+type TimeframeState struct {
+	TimeframeConfig
+	CurrentStartTime int64
+	Candle           *model.CandleModel
+	LastPublishTime  time.Time
+}
 
-	for tick := range inbox {
-		price, errP := decimal.NewFromString(tick.Price)
-		quantity, errQ := decimal.NewFromString(tick.Volume)
-		if errP != nil || errQ != nil {
-			continue
+type TickDataHandler struct {
+	exchange        string
+	symbol          string
+	timeframeStates []*TimeframeState
+	inbox           <-chan model.TickModel
+	saveChan        chan<- entity.CandleEntity
+	broadcastChan   chan<- dto.CandleUpdatedEvent
+}
+
+func NewTickDataHandler(exchange string, symbol string, timeframeConfigs []TimeframeConfig, inbox <-chan model.TickModel, saveChan chan<- entity.CandleEntity, broadcastChan chan<- dto.CandleUpdatedEvent) *TickDataHandler {
+	var timeframeStates []*TimeframeState
+	for _, config := range timeframeConfigs {
+		timeframeStates = append(timeframeStates, &TimeframeState{
+			TimeframeConfig:  config,
+			CurrentStartTime: 0,
+			Candle:           nil,
+			LastPublishTime:  time.Now(),
+		})
+	}
+
+	return &TickDataHandler{
+		exchange:        exchange,
+		symbol:          symbol,
+		timeframeStates: timeframeStates,
+		inbox:           inbox,
+		saveChan:        saveChan,
+		broadcastChan:   broadcastChan,
+	}
+}
+
+func (t *TickDataHandler) Start() {
+	for tick := range t.inbox {
+		now := time.Now()
+
+		for _, state := range t.timeframeStates {
+			startTime := GetBucketStartTime(tick.EventTime, state.IntervalMs)
+
+			if state.Candle == nil {
+				state.CurrentStartTime = startTime
+				state.Candle = model.NewCandleModel(t.exchange, t.symbol, startTime, state.IntervalMs)
+				continue
+			}
+
+			if state.TimeframeConfig.Timeframe == candleEntityTimeframe && startTime > state.CurrentStartTime {
+				candleEntity := entity.NewCandleEntity(state.Candle)
+				t.saveChan <- *candleEntity
+
+				state.CurrentStartTime = startTime
+				state.Candle.ResetForNextInterval(startTime, state.IntervalMs)
+			}
+
+			t.updateTimeframeCandle(state, tick)
+
+			if now.Sub(state.LastPublishTime) >= state.PublishRate {
+				t.publishEvent(state.Candle, state.Timeframe, t.broadcastChan)
+				state.LastPublishTime = now
+			}
 		}
+	}
+}
 
-		if candle == nil {
-			alignedStartTime := (tick.EventTime / 60000) * 60000
-			candle = model.NewCandleModel(exchange, symbol, alignedStartTime, 60000)
-		}
+func (t *TickDataHandler) updateTimeframeCandle(state *TimeframeState, tick model.TickModel) {
+	price, errP := decimal.NewFromString(tick.Price)
+	quantity, errQ := decimal.NewFromString(tick.Volume)
+	if errP != nil || errQ != nil {
+		return
+	}
 
-		if tick.EventTime >= candle.EndTime {
-			candleEntity := entity.NewCandleEntity(candle)
-			saveChan <- *candleEntity
+	state.Candle.Update(price, quantity, tick.IsTakerBuy)
+}
 
-			newStartTime := (tick.EventTime / 60000) * 60000
-			candle.ResetForNextMinute(newStartTime, 60000)
-		} else if tick.EventTime < candle.StartTime {
-			continue
-		}
-		candle.Update(price, quantity, tick.IsTakerBuy)
-
-		select {
-		case broadcastChan <- createCandleUpdatedEvent(dto.CandleUpdated, exchange, symbol, candleType, *candle):
-		default:
-			// Ignore if channel is full to avoid blocking
-		}
+func (t *TickDataHandler) publishEvent(candle *model.CandleModel, timeframe string, broadcastChan chan<- dto.CandleUpdatedEvent) {
+	select {
+	case broadcastChan <- createCandleUpdatedEvent(dto.CandleUpdated, t.exchange, t.symbol, timeframe, *candle):
+	default:
+		// Ignore if channel is full to avoid blocking
 	}
 }
 
@@ -54,4 +107,8 @@ func createCandleUpdatedEvent(eventType dto.CandleEvent, exchange string, symbol
 		Room:  roomName,
 		Data:  candle,
 	}
+}
+
+func GetBucketStartTime(candleStartTime int64, intervalMs int64) int64 {
+	return candleStartTime - (candleStartTime % intervalMs)
 }
