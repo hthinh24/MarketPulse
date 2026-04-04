@@ -1,11 +1,11 @@
 package main
 
 import (
-	controller "MarketPulse/internal/controller/http"
-	repository "MarketPulse/internal/infra/repository/postgres"
-	cache "MarketPulse/internal/infra/repository/redis"
-	"MarketPulse/internal/service"
-	"MarketPulse/internal/worker/server"
+	"MarketPulse/internal/server/controller"
+	"MarketPulse/internal/server/infrastructure"
+	repository "MarketPulse/internal/server/infrastructure/repository/postgres"
+	cache "MarketPulse/internal/server/infrastructure/repository/redis"
+	"MarketPulse/internal/server/service"
 	"context"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
@@ -42,7 +42,7 @@ func main() {
 	InitCacheWarmup(context.Background(), candleRepository, candleCache)
 
 	intervalTime := 1 * time.Hour
-	symbolRankingUpdater := server.NewSymbolRankingUpdater(candleRepository, candleCache, intervalTime)
+	symbolRankingUpdater := infrastructure.NewSymbolRankingUpdater(candleRepository, candleCache, intervalTime)
 
 	wg := sync.WaitGroup{}
 	wg.Add(1)

@@ -1,14 +1,14 @@
 package main
 
 import (
-	"MarketPulse/internal/dto"
-	"MarketPulse/internal/entity"
-	repository "MarketPulse/internal/infra/repository/postgres"
-	cache "MarketPulse/internal/infra/repository/redis"
-	"MarketPulse/internal/worker"
-	"MarketPulse/internal/worker/aggregator"
-	"MarketPulse/internal/worker/dbsync"
-	"MarketPulse/internal/worker/dbsync/adapter"
+	"MarketPulse/internal/aggregator/domain"
+	worker "MarketPulse/internal/aggregator/infrastructure"
+	"MarketPulse/internal/aggregator/infrastructure/dbsync"
+	adapter2 "MarketPulse/internal/aggregator/infrastructure/dbsync/adapter"
+	"MarketPulse/internal/aggregator/infrastructure/delivery"
+	aggregator "MarketPulse/internal/aggregator/infrastructure/publisher"
+	postgres2 "MarketPulse/internal/aggregator/infrastructure/repository/postgres"
+	redis2 "MarketPulse/internal/aggregator/infrastructure/repository/redis"
 	"context"
 	"github.com/go-redis/redis/v8"
 	"github.com/segmentio/kafka-go"
@@ -38,12 +38,12 @@ func main() {
 	batchSize := 400
 	saveChanSize := 5000
 	broadcastChanSize := 10000
-	broadcastChan := make(chan dto.CandleUpdatedEvent, broadcastChanSize)
+	broadcastChan := make(chan *domain.CandleModel, broadcastChanSize)
 
-	saveChan := make(chan entity.CandleEntity, saveChanSize)
+	saveChan := make(chan *domain.CandleModel, saveChanSize)
 
-	candleRepository := repository.NewCandleRepository(db)
-	candleCache := cache.NewCandleCache(rdb)
+	candleRepository := postgres2.NewCandleRepository(db)
+	candleCache := redis2.NewCandleCache(rdb)
 	dbIngestor := worker.NewDBIngestor(saveChan, candleCache, candleRepository, batchSize)
 
 	consumerGroup := "aggregator-group"
@@ -57,7 +57,7 @@ func main() {
 	bybitReader := kafka.NewReader(*InitKafkaReaderConfig("localhost:9092", kafkaTopicPrefix+"_"+strings.ToLower(bybitExchange), consumerGroup))
 
 	workerBuffer := 100
-	timeframeConfigs := []aggregator.TimeframeConfig{
+	timeframeConfigs := []delivery.TimeframeConfig{
 		{Timeframe: "1m", IntervalMs: 60 * 1000, PublishRate: 250 * time.Millisecond},
 		{Timeframe: "5m", IntervalMs: 300 * 1000, PublishRate: 500 * time.Millisecond},
 		{Timeframe: "15m", IntervalMs: 900 * 1000, PublishRate: 1 * time.Second},
@@ -66,9 +66,11 @@ func main() {
 		{Timeframe: "1w", IntervalMs: 604800 * 1000, PublishRate: 10 * time.Second},
 		{Timeframe: "1M", IntervalMs: 2592000 * 1000, PublishRate: 30 * time.Second},
 	}
-	binanceDispatcher := aggregator.NewDispatcher(binanceExchange, binanceReader, workerBuffer, timeframeConfigs, saveChan, broadcastChan)
-	okxDispatcher := aggregator.NewDispatcher(okxExchange, okxReader, workerBuffer, timeframeConfigs, saveChan, broadcastChan)
-	bybitDispatcher := aggregator.NewDispatcher(bybitExchange, bybitReader, workerBuffer, timeframeConfigs, saveChan, broadcastChan)
+
+	timeframes := []string{"1m", "5m", "15m", "1h", "1d", "1w", "1M"}
+	binanceDispatcher := delivery.NewDispatcher(binanceExchange, binanceReader, timeframes, workerBuffer, timeframeConfigs, saveChan, broadcastChan)
+	okxDispatcher := delivery.NewDispatcher(okxExchange, okxReader, timeframes, workerBuffer, timeframeConfigs, saveChan, broadcastChan)
+	bybitDispatcher := delivery.NewDispatcher(bybitExchange, bybitReader, timeframes, workerBuffer, timeframeConfigs, saveChan, broadcastChan)
 
 	candlePublisher := aggregator.NewCandleUpdatePublisher(broadcastChan, rdb)
 
@@ -76,9 +78,9 @@ func main() {
 	okxUrl := "https://www.okx.com/api/v5/public/instruments?instType=SPOT"
 	bybitUrl := "https://api.bybit.com/v5/market/instruments-info?category=spot"
 
-	binanceAdapter := adapter.NewBinanceAdapter(binanceExchange, binanceUrl)
-	okxAdapter := adapter.NewOKXAdapter(okxExchange, okxUrl)
-	bybitAdapter := adapter.NewBybitAdapter(bybitExchange, bybitUrl)
+	binanceAdapter := adapter2.NewBinanceAdapter(binanceExchange, binanceUrl)
+	okxAdapter := adapter2.NewOKXAdapter(okxExchange, okxUrl)
+	bybitAdapter := adapter2.NewBybitAdapter(bybitExchange, bybitUrl)
 
 	exchangeSymbolSyncer := dbsync.NewExchangeSymbolSyncer(
 		db,

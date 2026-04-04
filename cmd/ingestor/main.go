@@ -1,12 +1,13 @@
 package main
 
 import (
-	"MarketPulse/internal/config/kafka"
-	"MarketPulse/internal/exchange/binance"
-	"MarketPulse/internal/exchange/bybit"
-	"MarketPulse/internal/exchange/okx"
-	"MarketPulse/internal/model"
-	"MarketPulse/internal/worker/ingestor"
+	ingestor2 "MarketPulse/internal/ingestor"
+	"MarketPulse/internal/ingestor/config/kafka"
+	binance2 "MarketPulse/internal/ingestor/exchange/binance"
+	bybit2 "MarketPulse/internal/ingestor/exchange/bybit"
+	okx2 "MarketPulse/internal/ingestor/exchange/okx"
+	"MarketPulse/internal/ingestor/producer"
+	"MarketPulse/internal/ingestor/producer/event"
 	"context"
 	"fmt"
 	"log"
@@ -42,26 +43,26 @@ func main() {
 	kafkaWriter := kafka.NewKafkaWriter("localhost:9092", binanceKafkaTopic)
 	defer kafkaWriter.Close()
 
-	binanceProducerManager := ingestor.NewTickDataProducerManager(8)
-	binanceTradeChan := make(chan model.TickModel, 5000)
+	binanceProducerManager := producer.NewTickDataProducerManager(8)
+	binanceTradeChan := make(chan event.TickEvent, 5000)
 
 	writerWg.Add(1)
 	go binanceProducerManager.Start(ctx, &writerWg, binanceTradeChan, kafkaWriter, &counter)
 
-	allStreams, err := binance.GetActiveUSDTStreams()
+	allStreams, err := binance2.GetActiveUSDTStreams()
 	if err != nil {
 		log.Fatalf("Err when fetching data from %s! Err:  %v", binanceExchange, err)
 	}
 	log.Printf("Founded %d USDT trade pair on %s !", len(allStreams), binanceExchange)
 
-	chunks := binance.ChunkSlice(allStreams, 300)
+	chunks := binance2.ChunkSlice(allStreams, 300)
 	for i, chunk := range chunks {
 
 		streamPath := strings.Join(chunk, "/")
 		url := fmt.Sprintf("wss://stream.binance.com:9443/stream?streams=%s", streamPath)
 
-		binanceExchange := binance.NewBinanceAdapter(url)
-		exchangeIngestor := ingestor.NewExchangeIngestor(
+		binanceExchange := binance2.NewBinanceAdapter(url)
+		exchangeIngestor := ingestor2.NewExchangeIngestor(
 			binanceExchange,
 			binanceTradeChan,
 		)
@@ -77,27 +78,27 @@ func main() {
 	okxKafkaWriter := kafka.NewKafkaWriter("localhost:9092", okxKafkaTopic)
 	defer okxKafkaWriter.Close()
 
-	okxProducerManager := ingestor.NewTickDataProducerManager(8)
-	okxTradeChan := make(chan model.TickModel, 5000)
+	okxProducerManager := producer.NewTickDataProducerManager(8)
+	okxTradeChan := make(chan event.TickEvent, 5000)
 
 	writerWg.Add(1)
 	go okxProducerManager.Start(ctx, &writerWg, okxTradeChan, okxKafkaWriter, &counter)
 
-	okxStreams, err := okx.GetActiveUSDTStreams()
+	okxStreams, err := okx2.GetActiveUSDTStreams()
 	if err != nil {
 		log.Fatalf("Err when fetching data from OKX! Err:  %v", err)
 	}
 	log.Printf("Founded %d USDT trade pair on %s !", len(okxStreams), okxExchange)
 
-	okxChunks := okx.ChunkSlice(okxStreams, 100)
+	okxChunks := okx2.ChunkSlice(okxStreams, 100)
 	for i, chunk := range okxChunks {
-		var okxAdapter *okx.OKXAdapter
-		okxAdapter = okx.NewOKXAdapter(
+		var okxAdapter *okx2.OKXAdapter
+		okxAdapter = okx2.NewOKXAdapter(
 			"wss://ws.okx.com:8443/ws/v5/public",
 			chunk,
 		)
 
-		exchangeIngestor := ingestor.NewExchangeIngestor(
+		exchangeIngestor := ingestor2.NewExchangeIngestor(
 			okxAdapter,
 			okxTradeChan,
 		)
@@ -113,27 +114,27 @@ func main() {
 	bybitKafkaWriter := kafka.NewKafkaWriter("localhost:9092", bybitKafkaTopic)
 	defer bybitKafkaWriter.Close()
 
-	bybitProducerManager := ingestor.NewTickDataProducerManager(8)
-	bybitTradeChan := make(chan model.TickModel, 5000)
+	bybitProducerManager := producer.NewTickDataProducerManager(8)
+	bybitTradeChan := make(chan event.TickEvent, 5000)
 
 	writerWg.Add(1)
 	go bybitProducerManager.Start(ctx, &writerWg, bybitTradeChan, bybitKafkaWriter, &counter)
 
-	bybitStreams, err := bybit.GetActiveUSDTStreams()
+	bybitStreams, err := bybit2.GetActiveUSDTStreams()
 	if err != nil {
 		log.Fatalf("Err when fetching data from %s! Err:  %v", bybitExchange, err)
 	}
 	log.Printf("Founded %d USDT trade pair on %s !", len(bybitStreams), bybitExchange)
 
-	bybitChunks := bybit.ChunkSlice(bybitStreams, 100)
+	bybitChunks := bybit2.ChunkSlice(bybitStreams, 100)
 	for i, chunk := range bybitChunks {
-		var bybitAdapter *bybit.BybitAdapter
-		bybitAdapter = bybit.NewBybitAdapter(
+		var bybitAdapter *bybit2.BybitAdapter
+		bybitAdapter = bybit2.NewBybitAdapter(
 			"wss://stream.bytick.com/v5/public/spot",
 			chunk,
 		)
 
-		exchangeIngestor := ingestor.NewExchangeIngestor(
+		exchangeIngestor := ingestor2.NewExchangeIngestor(
 			bybitAdapter,
 			bybitTradeChan,
 		)

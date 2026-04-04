@@ -1,9 +1,9 @@
 package main
 
 import (
-	"MarketPulse/internal/controller/ws"
-	"MarketPulse/internal/service"
-	"MarketPulse/internal/worker"
+	"MarketPulse/internal/broadcaster"
+	"MarketPulse/internal/broadcaster/controller/ws"
+	"MarketPulse/internal/broadcaster/service"
 	"context"
 	"github.com/go-redis/redis/v8"
 	"log"
@@ -16,16 +16,16 @@ func main() {
 
 	log.Print("Connected to Redis successfully!")
 
-	broadcaster := service.NewBroadcasterService()
+	broadcasterService := service.NewBroadcasterService()
 
 	go func() {
 		log.Print("Starting Redis subscriber...")
-		worker.StartRedisSubscriber(context.Background(), rdb, broadcaster)
+		broadcaster.StartRedisSubscriber(context.Background(), rdb, broadcasterService)
 	}()
 
 	log.Print("Starting WebSocket server on :8081...")
 
-	wsController := ws.NewWSController(broadcaster)
+	wsController := ws.NewWSController(broadcasterService)
 
 	http.HandleFunc("/ws", wsController.HandleConnection)
 	err := http.ListenAndServe(":8081", nil)
