@@ -10,16 +10,18 @@ services:
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=root
       - POSTGRES_DB=marketpulse
-    restart: always
     volumes:
       - D:/workspace/Projects/MarketPulse/timescale-data:/var/lib/postgresql/data
+    networks:
+      - market_pulse-network
 
   redis:
     image: redis:8.0-alpine
     container_name: marketpulse-cache
     ports:
       - "6379:6379"
-    restart: always
+    networks:
+      - market_pulse-network
 
   zookeeper:
     image: confluentinc/cp-zookeeper:7.4.10
@@ -27,6 +29,11 @@ services:
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - D:/workspace/Projects/MarketPulse/zookeeper-data:/var/lib/zookeeper/data
+      - D:/workspace/Projects/MarketPulse/zookeeper-logs:/var/lib/zookeeper/log
+    networks:
+      - market_pulse-network
 
   kafka:
     image: confluentinc/cp-kafka:7.4.10
@@ -39,7 +46,10 @@ services:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
 
       KAFKA_NUM_PARTITIONS: 8
@@ -53,6 +63,8 @@ services:
       KAFKA_LOG_RETENTION_BYTES: 1073741824 # Storage data up to 1GB
     volumes:
       - D:/workspace/Projects/MarketPulse/kafka-data:/var/lib/kafka/data
+    networks:
+      - market_pulse-network
 
   kafka-ui:
     image: provectuslabs/kafka-ui:v0.7.2
@@ -64,6 +76,9 @@ services:
     environment:
       KAFKA_CLUSTERS_0_NAME: MarketPulse-Local
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+    networks:
+      - market_pulse-network
 
-#volumes:
-#  kafka_data:
+networks:
+  market_pulse-network:
+    external: true

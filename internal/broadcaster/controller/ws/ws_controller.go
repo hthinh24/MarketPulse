@@ -47,9 +47,15 @@ func (c *WSController) HandleConnection(w http.ResponseWriter, r *http.Request) 
 		log.Printf("Missing required query parameter: symbol\n")
 		return
 	}
-	intervel := r.URL.Query().Get("interval")
-	if intervel == "" {
-		intervel = "1m"
+	interval := r.URL.Query().Get("interval")
+	if interval == "" {
+		interval = "1m"
+	}
+
+	streamType := r.URL.Query().Get("stream")
+	if streamType == "" {
+		log.Printf("Missing required query parameter: stream\n")
+		return
 	}
 
 	conn, err := c.upgrader.Upgrade(w, r, nil)
@@ -58,7 +64,16 @@ func (c *WSController) HandleConnection(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	room := exchange + ":" + symbol + ":" + intervel
+	var room string
+	if streamType == "candle" {
+		room = "candles:" + exchange + ":" + symbol + ":" + interval
+	} else if streamType == "orderbook" {
+		room = "orderbook:" + exchange + ":" + symbol
+	} else {
+		http.Error(w, "Invalid stream type", http.StatusBadRequest)
+		return
+	}
+
 	client := NewWSClient(c.broadcaster, conn)
 	defer c.broadcaster.RemoveClient(client)
 

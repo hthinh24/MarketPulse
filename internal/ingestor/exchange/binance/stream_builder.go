@@ -2,6 +2,8 @@ package binance
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"strings"
 )
@@ -12,6 +14,11 @@ func GetActiveUSDTStreams() ([]string, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("Binance Discovery API Error: Status %d, Body: %s", resp.StatusCode, string(bodyBytes))
+	}
 
 	var info BinanceExchangeInfo
 	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {

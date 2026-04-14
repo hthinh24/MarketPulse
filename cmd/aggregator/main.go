@@ -9,12 +9,15 @@ import (
 	aggregator "MarketPulse/internal/aggregator/infrastructure/publisher"
 	postgres2 "MarketPulse/internal/aggregator/infrastructure/repository/postgres"
 	redis2 "MarketPulse/internal/aggregator/infrastructure/repository/redis"
+	"MarketPulse/internal/telemetry"
 	"context"
 	"github.com/go-redis/redis/v8"
 	"github.com/segmentio/kafka-go"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"log"
+	"net/http"
+	_ "net/http/pprof"
 	"os/signal"
 	"strings"
 	"sync"
@@ -23,8 +26,19 @@ import (
 )
 
 func main() {
+	go func() {
+		log.Println("pprof: http://localhost:6061/debug/pprof/")
+		log.Println(http.ListenAndServe("localhost:6061", nil))
+	}()
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	serviceName := "marketpulse-aggregator"
+	otlpEndpoint := "localhost:4317"
+
+	shutdown := telemetry.InitProvider(serviceName, otlpEndpoint)
+	defer shutdown(ctx)
 
 	db := InitDB()
 	rdb := initRedisDB()
@@ -56,7 +70,7 @@ func main() {
 	okxReader := kafka.NewReader(*InitKafkaReaderConfig("localhost:9092", kafkaTopicPrefix+"_"+strings.ToLower(okxExchange), consumerGroup))
 	bybitReader := kafka.NewReader(*InitKafkaReaderConfig("localhost:9092", kafkaTopicPrefix+"_"+strings.ToLower(bybitExchange), consumerGroup))
 
-	workerBuffer := 100
+	workerBuffer := 300
 	timeframeConfigs := []delivery.TimeframeConfig{
 		{Timeframe: "1m", IntervalMs: 60 * 1000, PublishRate: 250 * time.Millisecond},
 		{Timeframe: "5m", IntervalMs: 300 * 1000, PublishRate: 500 * time.Millisecond},
@@ -149,5 +163,11 @@ func InitKafkaReaderConfig(brokerURL string, topic string, groupID string) *kafk
 		Topic:       topic,
 		GroupID:     groupID,
 		StartOffset: kafka.LastOffset,
+
+		MinBytes: 10e3, // 10KB
+		MaxBytes: 10e6, // 10MB
+		MaxWait:  50 * time.Millisecond,
+
+		CommitInterval: 1 * time.Second,
 	}
 }

@@ -3,8 +3,11 @@ package delivery
 import (
 	"MarketPulse/internal/aggregator/application"
 	"MarketPulse/internal/aggregator/domain"
+	"MarketPulse/internal/aggregator/infrastructure/observation"
 	"context"
-	"encoding/json"
+	"github.com/bytedance/sonic"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	"log"
 	"sync"
 	"time"
@@ -61,7 +64,7 @@ func (d *Dispatcher) Start(ctx context.Context, wg *sync.WaitGroup) {
 			}
 
 			var tick domain.TickModel
-			if err := json.Unmarshal(msg.Value, &tick); err != nil {
+			if err := sonic.Unmarshal(msg.Value, &tick); err != nil {
 				log.Println("Error unmarshalling tick data:", err)
 				continue
 			}
@@ -78,12 +81,22 @@ func (d *Dispatcher) Start(ctx context.Context, wg *sync.WaitGroup) {
 					d.workers[tick.Symbol] = workerChan
 
 					tickDataHandler := application.NewTickDataHandler(domain.NewCandleService(d.timeframeStates), workerChan, d.dbSaveChan, d.publishChan)
-					go tickDataHandler.Start()
+					go tickDataHandler.Start(ctx)
 				}
 				d.mu.Unlock()
 			}
 
-			workerChan <- &tick
+			select {
+			case workerChan <- &tick:
+			default:
+				observation.TickEvents.Add(ctx, 1,
+					metric.WithAttributes(attribute.String("status", "dropped")),
+					metric.WithAttributes(attribute.String("exchange", tick.Exchange)),
+					metric.WithAttributes(attribute.String("symbol", tick.Symbol)),
+					metric.WithAttributes(attribute.String("reason", "worker_channel_full")),
+				)
+				log.Printf("Warning: Dropping tick data for %s due to full channel buffer", tick.Symbol)
+			}
 		}
 	}
 }

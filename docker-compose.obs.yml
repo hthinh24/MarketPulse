@@ -1,0 +1,55 @@
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.149.0
+    container_name: marketpulse-otel-collector
+    command: [ "--config=/etc/otel-collector-config.yml" ]
+    volumes:
+      - ./infrastructure/otel/otel-collector-config.yml:/etc/otel-collector-config.yml
+    ports:
+      - "4317:4317" # gRPC port
+      - "4318:4318" # HTTP port
+      - "8889:8889"
+    networks:
+      - market_pulse-network
+
+  prometheus:
+    image: prom/prometheus:v3.11.1
+    container_name: marketpulse-prometheus
+    depends_on:
+      - otel-collector
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infrastructure/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - D:/workspace/Projects/MarketPulse/prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+
+      # Data retention settings
+      - '--storage.tsdb.retention.time=3d' # Storage data for at least 3 days
+      - '--storage.tsdb.retention.size=1GB' # Storage data up to 1GB
+    networks:
+      - market_pulse-network
+
+  grafana:
+    image: grafana/grafana:12.4
+    container_name: marketpulse-grafana
+    depends_on:
+      - prometheus
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - D:/workspace/Projects/MarketPulse/grafana-data:/var/lib/grafana
+      - ./infrastructure/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards
+      - ./infrastructure/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources
+    networks:
+      - market_pulse-network
+
+networks:
+  market_pulse-network:
+    external: true

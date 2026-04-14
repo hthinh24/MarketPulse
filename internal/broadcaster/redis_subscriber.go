@@ -10,18 +10,14 @@ type IBroadcaster interface {
 	BroadcastToRoom(room string, msg []byte)
 }
 
-func StartRedisSubscriber(ctx context.Context, redisClient *redis.Client, broadcaster IBroadcaster) {
-	// TODO(refactor): Move channel config to config file or via configuration struct
-	// Currently hard coded just for simplicity
-	candleChannelPattern := "marketpulse:candles:*"
-	candleChannelPrefix := "marketpulse:candles:"
-
-	pubsub := redisClient.PSubscribe(ctx, candleChannelPattern)
+func StartRedisSubscriber(ctx context.Context, redisClient *redis.Client, broadcaster IBroadcaster, channelPattern string, channelPrefix string) {
+	pubsub := redisClient.PSubscribe(ctx, channelPattern)
 	ch := pubsub.Channel()
 
 	for msg := range ch {
-		if strings.HasPrefix(msg.Channel, candleChannelPrefix) {
-			room := strings.TrimPrefix(msg.Channel, candleChannelPrefix)
+		if strings.HasPrefix(msg.Channel, channelPrefix) {
+			room := strings.TrimPrefix(msg.Channel, channelPrefix)
+			//log.Printf("Received message for room %s", room)
 			broadcaster.BroadcastToRoom(room, []byte(msg.Payload))
 		}
 	}

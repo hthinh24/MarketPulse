@@ -61,6 +61,8 @@ func (s *broadcasterService) BroadcastToRoom(topic string, msg []byte) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	failedClient := []*ws.WSClient{}
+
 	for client := range s.rooms[topic] {
 		select {
 		case client.SendChan <- msg:
@@ -68,7 +70,11 @@ func (s *broadcasterService) BroadcastToRoom(topic string, msg []byte) {
 		default:
 			// drop message when client send channel is full to avoid blocking the broadcaster
 			// For now just skip sending to this client
-			s.RemoveClient(client)
+			failedClient = append(failedClient, client)
 		}
+	}
+
+	for _, client := range failedClient {
+		s.RemoveClient(client)
 	}
 }

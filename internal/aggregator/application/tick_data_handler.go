@@ -2,6 +2,10 @@ package application
 
 import (
 	"MarketPulse/internal/aggregator/domain"
+	"MarketPulse/internal/aggregator/infrastructure/observation"
+	"context"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 )
 
 type TickDataHandler struct {
@@ -20,16 +24,30 @@ func NewTickDataHandler(candleService *domain.CandleService, inbox <-chan *domai
 	}
 }
 
-func (t *TickDataHandler) Start() {
-	for tick := range t.inbox {
-		processResult := t.candleService.ProcessTick(tick)
+func (t *TickDataHandler) Start(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case tick, ok := <-t.inbox:
+			if !ok {
+				return
+			}
 
-		for _, closedCandle := range processResult.ClosedCandles {
-			t.saveChan <- closedCandle
-		}
+			processResult := t.candleService.ProcessTick(tick)
 
-		for _, updatedCandle := range processResult.UpdatedCandles {
-			t.broadcastChan <- updatedCandle
+			observation.TickEvents.Add(ctx, 1,
+				metric.WithAttributes(attribute.String("status", "processed")),
+				metric.WithAttributes(attribute.String("exchange", tick.Exchange)),
+			)
+
+			for _, closedCandle := range processResult.ClosedCandles {
+				t.saveChan <- closedCandle
+			}
+
+			for _, updatedCandle := range processResult.UpdatedCandles {
+				t.broadcastChan <- updatedCandle
+			}
 		}
 	}
 }
