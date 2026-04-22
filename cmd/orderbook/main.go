@@ -49,7 +49,7 @@ func main() {
 			SymbolDiscoveryUrl: "https://api.binance.com/api/v3/exchangeInfo",
 			SnapshotUrl:        "https://api.binance.com/api/v3/depth",
 			StreamUrl:          "wss://stream.binance.com:9443/stream",
-			StreamBufferSize:   5000,
+			StreamBufferSize:   50000,
 			DeltaQueueSize:     1000,
 		},
 		//{Name: "OKX", SnapshotUrl: "wss://ws.okx.com:8443/ws/v5/public?brokerId=9999", BufferSize: 5000},

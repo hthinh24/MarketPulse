@@ -70,7 +70,7 @@ func main() {
 	okxReader := kafka.NewReader(*InitKafkaReaderConfig("localhost:9092", kafkaTopicPrefix+"_"+strings.ToLower(okxExchange), consumerGroup))
 	bybitReader := kafka.NewReader(*InitKafkaReaderConfig("localhost:9092", kafkaTopicPrefix+"_"+strings.ToLower(bybitExchange), consumerGroup))
 
-	workerBuffer := 300
+	workerBuffer := 2000
 	timeframeConfigs := []delivery.TimeframeConfig{
 		{Timeframe: "1m", IntervalMs: 60 * 1000, PublishRate: 250 * time.Millisecond},
 		{Timeframe: "5m", IntervalMs: 300 * 1000, PublishRate: 500 * time.Millisecond},

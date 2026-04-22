@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"github.com/gorilla/websocket"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -33,6 +34,7 @@ func NewBinanceAdapter(config *config.ExchangeConfig) *BinanceAdapter {
 func (b *BinanceAdapter) DiscoverySymbol(ctx context.Context) ([]string, error) {
 	resp, err := http.Get(b.symbolDiscoveryUrl)
 	if err != nil {
+		log.Printf("Error fetching symbol discovery for %s: %v\n", b.name, err)
 		return nil, err
 	}
 	defer resp.Body.Close()
@@ -60,6 +62,7 @@ func (b *BinanceAdapter) DiscoverySymbol(ctx context.Context) ([]string, error) 
 func (b *BinanceAdapter) FetchSnapshot(ctx context.Context, symbol string) (*event.OrderBookEvent, error) {
 	resp, err := http.Get(fmt.Sprintf(b.snapshotUrl+"?symbol=%s&limit=1000", strings.ToUpper(symbol)))
 	if err != nil {
+		log.Printf("Error fetching snapshot for %s: %v\n", symbol, err)
 		return nil, err
 	}
 
@@ -107,7 +110,7 @@ func (b *BinanceAdapter) GetName() string {
 func (b *BinanceAdapter) connectAndListen(ctx context.Context, chunk []string, deltaChan chan<- event.OrderBookEvent) {
 	var streams []string
 	for _, symbol := range chunk {
-		streams = append(streams, fmt.Sprintf("%s@depth", strings.ToLower(symbol)))
+		streams = append(streams, fmt.Sprintf("%s@depth@100ms", strings.ToLower(symbol)))
 	}
 	url := fmt.Sprintf(b.streamUrl+"?streams=%s", strings.Join(streams, "/"))
 

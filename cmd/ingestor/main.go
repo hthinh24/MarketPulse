@@ -51,7 +51,7 @@ func main() {
 
 	allStreams, err := binance2.GetActiveUSDTStreams()
 	if err != nil {
-		log.Fatalf("Err when fetching data from %s! Err:  %v", binanceExchange, err)
+		log.Printf("Err when fetching data from %s! Err:  %v", binanceExchange, err)
 	}
 	log.Printf("Founded %d USDT trade pair on %s !", len(allStreams), binanceExchange)
 

@@ -6,7 +6,7 @@ import (
 )
 
 var (
-	meter = otel.Meter("market-pulse.aggregator")
+	meter = otel.Meter("market-pulse.orderbook")
 
 	OrderBookEvents, _ = meter.Int64Counter(
 		"orderbook_events_total",

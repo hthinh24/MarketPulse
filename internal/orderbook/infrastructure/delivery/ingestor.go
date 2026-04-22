@@ -30,6 +30,7 @@ func (e *ExchangeIngestor) Start(ctx context.Context, publishChan chan<- *event.
 
 	symbols, err := e.adapter.DiscoverySymbol(ctx)
 	if err != nil {
+		log.Printf("Error discovering symbols for %s: %v\n", e.adapterConfig.Name, err)
 		return
 	}
 
@@ -42,7 +43,7 @@ func (e *ExchangeIngestor) Start(ctx context.Context, publishChan chan<- *event.
 	reSyncChan := make(chan string, 1000)
 
 	for _, symbol := range symbols {
-		ch := make(chan event.OrderBookEvent, 100)
+		ch := make(chan event.OrderBookEvent, 5000)
 		engineChans[symbol] = ch
 
 		engine := service.NewOrderBookEngine(e.adapterConfig.Name, symbol, e.adapterConfig.DeltaQueueSize)
