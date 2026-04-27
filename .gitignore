@@ -5,3 +5,6 @@
 .env
 
 README.md
+
+k6
+Makefile

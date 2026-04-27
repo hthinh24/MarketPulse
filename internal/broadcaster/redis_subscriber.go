@@ -7,18 +7,26 @@ import (
 )
 
 type IBroadcaster interface {
-	BroadcastToRoom(room string, msg []byte)
+	BroadcastToRoom(ctx context.Context, room string, msg []byte)
 }
 
 func StartRedisSubscriber(ctx context.Context, redisClient *redis.Client, broadcaster IBroadcaster, channelPattern string, channelPrefix string) {
 	pubsub := redisClient.PSubscribe(ctx, channelPattern)
 	ch := pubsub.Channel()
 
-	for msg := range ch {
-		if strings.HasPrefix(msg.Channel, channelPrefix) {
-			room := strings.TrimPrefix(msg.Channel, channelPrefix)
-			//log.Printf("Received message for room %s", room)
-			broadcaster.BroadcastToRoom(room, []byte(msg.Payload))
+	for {
+		select {
+		case <-ctx.Done():
+			pubsub.Close()
+			return
+		case msg, ok := <-ch:
+			if !ok {
+				return
+			}
+			if strings.HasPrefix(msg.Channel, channelPrefix) {
+				room := strings.TrimPrefix(msg.Channel, channelPrefix)
+				broadcaster.BroadcastToRoom(ctx, room, []byte(msg.Payload))
+			}
 		}
 	}
 }

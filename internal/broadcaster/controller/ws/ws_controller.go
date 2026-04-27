@@ -1,15 +1,16 @@
 package ws
 
 import (
+	"context"
 	"github.com/gorilla/websocket"
 	"log"
 	"net/http"
 )
 
 type IBroadcaster interface {
-	SubscribeToRoom(topic string, client *WSClient)
-	UnsubscribeFromRoom(topic string, client *WSClient)
-	RemoveClient(client *WSClient)
+	SubscribeToRoom(ctx context.Context, topic string, client *WSClient)
+	UnsubscribeFromRoom(ctx context.Context, topic string, client *WSClient)
+	RemoveClient(ctx context.Context, client *WSClient, reason string)
 }
 
 type WSController struct {
@@ -29,6 +30,8 @@ func NewWSController(b IBroadcaster) *WSController {
 }
 
 func (c *WSController) HandleConnection(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
 	err := c.validateWSRequest(r)
 	if err != nil {
 		log.Printf("Invalid WebSocket request: %v\n", err)
@@ -74,14 +77,12 @@ func (c *WSController) HandleConnection(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	client := NewWSClient(c.broadcaster, conn)
-	defer c.broadcaster.RemoveClient(client)
+	client := NewWSClient(conn, c.broadcaster)
+	defer c.broadcaster.RemoveClient(ctx, client, "disconnect")
 
-	c.broadcaster.SubscribeToRoom(room, client)
+	c.broadcaster.SubscribeToRoom(ctx, room, client)
 
-	log.Printf("WSClient %p subscribed to room: %s\n", client, room)
-
-	go client.readPump()
+	go client.readPump(ctx)
 	client.writePump()
 }
 

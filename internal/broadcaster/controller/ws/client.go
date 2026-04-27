@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"context"
 	"github.com/gorilla/websocket"
 	"log"
 	"sync"
@@ -13,32 +14,28 @@ const (
 	writeWait  = 10 * time.Second    // 10 seconds
 )
 
-type Hub interface {
-	RemoveClient(client *WSClient)
-}
-
-// WSClient represents a single WebSocket connection to provided hub.
+// WSClient represents a single WebSocket connection.
 // It should start by calling readPump() and writePump() in separate goroutines
 // to handle incoming and outgoing messages from server and health check (heartbeat).
 type WSClient struct {
-	hub      Hub
-	conn     *websocket.Conn
-	SendChan chan []byte
-	closeOne sync.Once
+	conn        *websocket.Conn
+	broadcaster IBroadcaster
+	SendChan    chan []byte
+	closeOne    sync.Once
 }
 
-func NewWSClient(hub Hub, conn *websocket.Conn) *WSClient {
+func NewWSClient(conn *websocket.Conn, broadcaster IBroadcaster) *WSClient {
 	return &WSClient{
-		hub:      hub,
-		conn:     conn,
-		SendChan: make(chan []byte, 256),
+		conn:        conn,
+		broadcaster: broadcaster,
+		SendChan:    make(chan []byte, 256),
 	}
 }
 
 // readPump listens for incoming messages from websocket connection
 // NOTE: In this implementation, we only handle connection health check (pong messages)
 // and ignore user messages.
-func (c *WSClient) readPump() {
+func (c *WSClient) readPump(ctx context.Context) {
 	c.conn.SetReadDeadline(time.Now().Add(pongWait))
 
 	c.conn.SetPongHandler(func(string) error {
@@ -48,7 +45,7 @@ func (c *WSClient) readPump() {
 
 	for {
 		if _, _, err := c.conn.ReadMessage(); err != nil {
-			c.hub.RemoveClient(c)
+			c.broadcaster.RemoveClient(ctx, c, "disconnect")
 			break
 		}
 		// Ignore user messages

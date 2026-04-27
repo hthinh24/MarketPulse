@@ -26,7 +26,8 @@ func InitProvider(serviceName string, grpcEndpoint string) func(context.Context)
 	}
 
 	hostName, _ := os.Hostname()
-	instanceID := hostName + "-" + uuid.NewString()
+	// UUIDv7 has timestamp base that auto-increased support to sorted
+	instanceID := hostName + "-" + uuid.Must(uuid.NewV7()).String()
 
 	res := resource.NewWithAttributes(
 		semconv.SchemaURL,
