@@ -4,8 +4,8 @@ import (
 	"MarketPulse/internal/aggregator/domain"
 	"MarketPulse/internal/aggregator/infrastructure/publisher/dto"
 	"context"
-	"encoding/json"
 	"fmt"
+	"github.com/bytedance/sonic"
 	"github.com/go-redis/redis/v8"
 	"log"
 	"sync"
@@ -61,7 +61,7 @@ func (b *CandleEventPublisher) Start(ctx context.Context, wg *sync.WaitGroup) {
 					EventType: string(candleData.Event),
 					Data:      candleData,
 				}
-				redisMessage, _ := json.Marshal(wsEvent)
+				redisMessage, _ := sonic.Marshal(wsEvent)
 
 				channel := room
 				b.redisClient.Publish(context.Background(), channel, redisMessage)

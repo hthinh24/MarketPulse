@@ -3,12 +3,16 @@ package main
 import (
 	"MarketPulse/internal/aggregator/domain"
 	worker "MarketPulse/internal/aggregator/infrastructure"
+	postgres2 "MarketPulse/internal/aggregator/infrastructure/repository/postgres"
+	redis2 "MarketPulse/internal/aggregator/infrastructure/repository/redis"
+
+	//worker "MarketPulse/internal/aggregator/infrastructure"
 	"MarketPulse/internal/aggregator/infrastructure/dbsync"
 	adapter2 "MarketPulse/internal/aggregator/infrastructure/dbsync/adapter"
 	"MarketPulse/internal/aggregator/infrastructure/delivery"
 	aggregator "MarketPulse/internal/aggregator/infrastructure/publisher"
-	postgres2 "MarketPulse/internal/aggregator/infrastructure/repository/postgres"
-	redis2 "MarketPulse/internal/aggregator/infrastructure/repository/redis"
+	//postgres2 "MarketPulse/internal/aggregator/infrastructure/repository/postgres"
+	//redis2 "MarketPulse/internal/aggregator/infrastructure/repository/redis"
 	"MarketPulse/internal/telemetry"
 	"context"
 	"github.com/go-redis/redis/v8"
@@ -70,7 +74,7 @@ func main() {
 	okxReader := kafka.NewReader(*InitKafkaReaderConfig("localhost:9092", kafkaTopicPrefix+"_"+strings.ToLower(okxExchange), consumerGroup))
 	bybitReader := kafka.NewReader(*InitKafkaReaderConfig("localhost:9092", kafkaTopicPrefix+"_"+strings.ToLower(bybitExchange), consumerGroup))
 
-	workerBuffer := 300
+	workerBuffer := 1000
 	timeframeConfigs := []delivery.TimeframeConfig{
 		{Timeframe: "1m", IntervalMs: 60 * 1000, PublishRate: 250 * time.Millisecond},
 		{Timeframe: "5m", IntervalMs: 300 * 1000, PublishRate: 500 * time.Millisecond},

@@ -1,4 +1,4 @@
-package worker
+package infrastructure
 
 import (
 	"MarketPulse/internal/aggregator/application"

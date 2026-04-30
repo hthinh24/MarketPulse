@@ -25,7 +25,7 @@ type Dispatcher struct {
 	exchangeName     string
 	kafkaReader      *kafka.Reader
 	timeframeStates  []string
-	workers          map[string]chan *domain.TickModel
+	workers          map[string]chan *application.TickEvent
 	workerBuffer     int
 	timeframeConfigs []TimeframeConfig
 	mu               sync.RWMutex
@@ -38,7 +38,7 @@ func NewDispatcher(exchange string, reader *kafka.Reader, timeframeStates []stri
 		exchangeName:     exchange,
 		kafkaReader:      reader,
 		timeframeStates:  timeframeStates,
-		workers:          make(map[string]chan *domain.TickModel),
+		workers:          make(map[string]chan *application.TickEvent),
 		workerBuffer:     workerBuffer,
 		timeframeConfigs: timeframeConfigs,
 		dbSaveChan:       dbChan,
@@ -63,22 +63,27 @@ func (d *Dispatcher) Start(ctx context.Context, wg *sync.WaitGroup) {
 				continue
 			}
 
-			var tick domain.TickModel
-			if err := sonic.Unmarshal(msg.Value, &tick); err != nil {
-				log.Println("Error unmarshalling tick data:", err)
+			var tickData domain.TickModel
+			if err := sonic.Unmarshal(msg.Value, &tickData); err != nil {
+				log.Println("Error unmarshalling tickEvent data:", err)
 				continue
 			}
 
+			tickEvent := application.TickEvent{
+				Timestamp: time.Now(),
+				Data:      tickData,
+			}
+
 			d.mu.RLock()
-			workerChan, exists := d.workers[tick.Symbol]
+			workerChan, exists := d.workers[tickEvent.Data.Symbol]
 			d.mu.RUnlock()
 
 			if !exists {
 				d.mu.Lock()
-				workerChan, exists = d.workers[tick.Symbol]
+				workerChan, exists = d.workers[tickEvent.Data.Symbol]
 				if !exists {
-					workerChan = make(chan *domain.TickModel, d.workerBuffer)
-					d.workers[tick.Symbol] = workerChan
+					workerChan = make(chan *application.TickEvent, d.workerBuffer)
+					d.workers[tickEvent.Data.Symbol] = workerChan
 
 					tickDataHandler := application.NewTickDataHandler(domain.NewCandleService(d.timeframeStates), workerChan, d.dbSaveChan, d.publishChan)
 					go tickDataHandler.Start(ctx)
@@ -87,15 +92,14 @@ func (d *Dispatcher) Start(ctx context.Context, wg *sync.WaitGroup) {
 			}
 
 			select {
-			case workerChan <- &tick:
+			case workerChan <- &tickEvent:
 			default:
 				observation.TickEvents.Add(ctx, 1,
 					metric.WithAttributes(attribute.String("status", "dropped")),
-					metric.WithAttributes(attribute.String("exchange", tick.Exchange)),
-					metric.WithAttributes(attribute.String("symbol", tick.Symbol)),
+					metric.WithAttributes(attribute.String("exchange", tickEvent.Data.Exchange)),
+					metric.WithAttributes(attribute.String("symbol", tickEvent.Data.Symbol)),
 					metric.WithAttributes(attribute.String("reason", "worker_channel_full")),
 				)
-				log.Printf("Warning: Dropping tick data for %s due to full channel buffer", tick.Symbol)
 			}
 		}
 	}
