@@ -4,6 +4,8 @@
 # Env #
 .env
 
+docs
+
 README.md
 
 k6

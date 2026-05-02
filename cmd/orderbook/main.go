@@ -42,19 +42,7 @@ func main() {
 	redisClient := initRedisDB(redisConfig)
 	defer redisClient.Close()
 
-	// Code here
-	exchangeConfigs := []*config.ExchangeConfig{
-		{
-			Name:               "BINANCE",
-			SymbolDiscoveryUrl: "https://api.binance.com/api/v3/exchangeInfo",
-			SnapshotUrl:        "https://api.binance.com/api/v3/depth",
-			StreamUrl:          "wss://stream.binance.com:9443/stream",
-			StreamBufferSize:   5000,
-			DeltaQueueSize:     1000,
-		},
-		//{Name: "OKX", SnapshotUrl: "wss://ws.okx.com:8443/ws/v5/public?brokerId=9999", BufferSize: 5000},
-		//{Name: "Bybit", SnapshotUrl: "wss://stream.bybit.com/realtime_public", BufferSize: 5000},
-	}
+	exchangeConfigs := loadExchangeConfigs()
 
 	publishChan := make(chan *event.OrderBookSnapshot, 10000)
 	numOfPublishChannel := redisConfig.PoolSize
@@ -67,8 +55,10 @@ func main() {
 		go func(config *config.ExchangeConfig) {
 			defer wg.Done()
 
-			exchangeIngestor := delivery.NewExchangeIngestor(cfg)
-			exchangeIngestor.Start(ctx, publishChan)
+			adapter := delivery.NewExchangeAdapter(config)
+			if err := adapter.Start(ctx, publishChan); err != nil {
+				log.Printf("Adapter %s failed to start: %v", config.Name, err)
+			}
 		}(cfg)
 	}
 
@@ -95,6 +85,26 @@ func main() {
 		log.Println("Shutdown signal received, waiting for ongoing operations to finish...")
 	case <-timeoutContext.Done():
 		log.Println("Timeout reached, forcing shutdown...")
+	}
+}
+
+func loadExchangeConfigs() []*config.ExchangeConfig {
+	return []*config.ExchangeConfig{
+		{
+			Name:                "BINANCE",
+			SymbolDiscoveryUrl:  "https://api.binance.com/api/v3/exchangeInfo",
+			SnapshotUrl:         "https://api.binance.com/api/v3/depth",
+			StreamUrl:           "wss://stream.binance.com:9443/stream",
+			StreamBufferSize:    5000,
+			DeltaQueueSize:      1000,
+			RetryMaxAttempts:    10,
+			RetryInitialDelayMs: 100,
+			RetryMaxDelayMs:     5000,
+			BTreeDegree:         32,
+			SnapshotQuantity:    20,
+		},
+		//{Name: "OKX", SymbolDiscoveryUrl: "...", SnapshotUrl: "...", StreamUrl: "...", StreamBufferSize: 5000, DeltaQueueSize: 1000, RetryMaxAttempts: 8, RetryInitialDelayMs: 200, RetryMaxDelayMs: 10000, BTreeDegree: 32, SnapshotQuantity: 20},
+		//{Name: "Bybit", SymbolDiscoveryUrl: "...", SnapshotUrl: "...", StreamUrl: "...", StreamBufferSize: 5000, DeltaQueueSize: 1000, RetryMaxAttempts: 8, RetryInitialDelayMs: 200, RetryMaxDelayMs: 10000, BTreeDegree: 32, SnapshotQuantity: 20},
 	}
 }
 

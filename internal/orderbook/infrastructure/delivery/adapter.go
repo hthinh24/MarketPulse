@@ -7,11 +7,12 @@ import (
 	"context"
 )
 
+// ExchangeAdapter defines the interface for exchange-specific adapters.
+// Each adapter is responsible for the complete lifecycle: symbol discovery,
+// WebSocket subscription, sequence validation, gap detection, resync with backoff,
+// and metrics reporting. Adapters own per-symbol state internally.
 type ExchangeAdapter interface {
-	DiscoverySymbol(ctx context.Context) ([]string, error)
-	FetchSnapshot(ctx context.Context, symbol string) (*event.OrderBookEvent, error)
-	SubscribeOrderBooks(ctx context.Context, symbols []string, deltaChan chan<- event.OrderBookEvent) error
-	GetName() string
+	Start(ctx context.Context, publishChan chan<- *event.OrderBookSnapshot) error
 }
 
 func NewExchangeAdapter(exchangeConfig *config.ExchangeConfig) ExchangeAdapter {
@@ -21,8 +22,9 @@ func NewExchangeAdapter(exchangeConfig *config.ExchangeConfig) ExchangeAdapter {
 	case "BINANCE":
 		return binance.NewBinanceAdapter(exchangeConfig)
 	//case "OKX":
-	//	return okx.NewAdapter(exchangeConfig.SnapshotUrl)
+	//	return okx.NewAdapter(exchangeConfig)
 	//case "BYBIT":
+	//	return bybit.NewAdapter(exchangeConfig)
 	default:
 		panic("Unsupported exchange: " + name)
 	}
