@@ -41,17 +41,19 @@ type BinanceAdapter struct {
 
 func NewBinanceAdapter(config *config.ExchangeConfig) *BinanceAdapter {
 	return &BinanceAdapter{
-		name:                config.Name,
-		symbolDiscoveryUrl:  config.SymbolDiscoveryUrl,
-		snapshotUrl:         config.SnapshotUrl,
-		streamUrl:           config.StreamUrl,
-		streamBufferSize:    config.StreamBufferSize,
-		deltaQueueSize:      config.DeltaQueueSize,
+		name:               config.Name,
+		symbolDiscoveryUrl: config.SymbolDiscoveryUrl,
+		snapshotUrl:        config.SnapshotUrl,
+		streamUrl:          config.StreamUrl,
+		streamBufferSize:   config.StreamBufferSize,
+		deltaQueueSize:     config.DeltaQueueSize,
+
 		retryMaxAttempts:    config.RetryMaxAttempts,
 		retryInitialDelayMs: config.RetryInitialDelayMs,
 		retryMaxDelayMs:     config.RetryMaxDelayMs,
-		btreeDegree:         config.BTreeDegree,
-		snapshotQuantity:    config.SnapshotQuantity,
+
+		btreeDegree:      config.BTreeDegree,
+		snapshotQuantity: config.SnapshotQuantity,
 
 		lastUpdateID:   make(map[string]int64),
 		isSynced:       make(map[string]bool),
@@ -71,7 +73,7 @@ func (b *BinanceAdapter) Start(ctx context.Context, publishChan chan<- *event.Or
 		log.Printf("Failed to discover symbols: %v", err)
 		return err
 	}
-	log.Printf("Discovered %d symbols", len(symbols))
+	log.Printf("Discovered %d symbols on %s", len(symbols), b.name)
 
 	// Initialize per-symbol state
 	b.mu.Lock()
@@ -405,6 +407,7 @@ func (b *BinanceAdapter) convertToOrderLevels(priceSizePairs [][]string) []event
 			log.Printf("Error parsing price/size: %v, %v", err1, err2)
 			continue
 		}
+
 		orderLevels = append(orderLevels, event.OrderLevel{
 			Price: price,
 			Size:  size,

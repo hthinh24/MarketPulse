@@ -103,8 +103,31 @@ func loadExchangeConfigs() []*config.ExchangeConfig {
 			BTreeDegree:         32,
 			SnapshotQuantity:    20,
 		},
-		//{Name: "OKX", SymbolDiscoveryUrl: "...", SnapshotUrl: "...", StreamUrl: "...", StreamBufferSize: 5000, DeltaQueueSize: 1000, RetryMaxAttempts: 8, RetryInitialDelayMs: 200, RetryMaxDelayMs: 10000, BTreeDegree: 32, SnapshotQuantity: 20},
-		//{Name: "Bybit", SymbolDiscoveryUrl: "...", SnapshotUrl: "...", StreamUrl: "...", StreamBufferSize: 5000, DeltaQueueSize: 1000, RetryMaxAttempts: 8, RetryInitialDelayMs: 200, RetryMaxDelayMs: 10000, BTreeDegree: 32, SnapshotQuantity: 20},
+		{
+			Name:                "BYBIT",
+			SymbolDiscoveryUrl:  "https://api.bybit.com/v5/market/instruments-info?category=spot&status=Trading",
+			SnapshotUrl:         "https://api.bybit.com/v5/market/orderbook",
+			StreamUrl:           "wss://stream.bybit.com/v5/public/spot",
+			StreamBufferSize:    5000,
+			DeltaQueueSize:      1000,
+			RetryMaxAttempts:    10,
+			RetryInitialDelayMs: 100,
+			RetryMaxDelayMs:     5000,
+			BTreeDegree:         32,
+			SnapshotQuantity:    20,
+		},
+		//{
+		//	Name:                "OKX",
+		//	SymbolDiscoveryUrl:  "https://www.okx.com/api/v5/public/instruments?instType=SPOT",
+		//	StreamUrl:           "wss://ws.okx.com:8443/ws/v5/public",
+		//	StreamBufferSize:    5000,
+		//	DeltaQueueSize:      1000,
+		//	RetryMaxAttempts:    8,
+		//	RetryInitialDelayMs: 200,
+		//	RetryMaxDelayMs:     10000,
+		//	BTreeDegree:         32,
+		//	SnapshotQuantity:    20,
+		//},
 	}
 }
 
