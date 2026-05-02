@@ -48,6 +48,9 @@ type BybitWSOrderBookMessage struct {
 }
 
 type BybitWsCommandMessage struct {
-	Op   string   `json:"op"`   // "subscribe" | "unsubscribe"
-	Args []string `json:"args"` // orderbook.{depth}.{symbol}, e.g. ["orderbook.50.BTCUSDT"]
+	Op string `json:"op"` // "subscribe" | "unsubscribe"
+
+	// Args orderbook.{depth}.{symbol}, e.g. ["orderbook.50.BTCUSDT"]
+	// Note: For depth = 50, latency is 20ms
+	Args []string `json:"args"`
 }

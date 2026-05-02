@@ -207,7 +207,7 @@ func (b *BinanceAdapter) subscribeOrderBooks(ctx context.Context, symbols []stri
 func (b *BinanceAdapter) connectAndListenChunk(ctx context.Context, chunk []string, deltaChan chan<- event.OrderBookEvent) {
 	var streams []string
 	for _, symbol := range chunk {
-		streams = append(streams, fmt.Sprintf("%s@depth", strings.ToLower(symbol)))
+		streams = append(streams, fmt.Sprintf("%s@depth@100ms", strings.ToLower(symbol)))
 	}
 	url := fmt.Sprintf("%s?streams=%s", b.streamUrl, strings.Join(streams, "/"))
 

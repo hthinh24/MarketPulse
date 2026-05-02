@@ -90,19 +90,19 @@ func main() {
 
 func loadExchangeConfigs() []*config.ExchangeConfig {
 	return []*config.ExchangeConfig{
-		{
-			Name:                "BINANCE",
-			SymbolDiscoveryUrl:  "https://api.binance.com/api/v3/exchangeInfo",
-			SnapshotUrl:         "https://api.binance.com/api/v3/depth",
-			StreamUrl:           "wss://stream.binance.com:9443/stream",
-			StreamBufferSize:    5000,
-			DeltaQueueSize:      1000,
-			RetryMaxAttempts:    10,
-			RetryInitialDelayMs: 100,
-			RetryMaxDelayMs:     5000,
-			BTreeDegree:         32,
-			SnapshotQuantity:    20,
-		},
+		//{
+		//	Name:                "BINANCE",
+		//	SymbolDiscoveryUrl:  "https://api.binance.com/api/v3/exchangeInfo",
+		//	SnapshotUrl:         "https://api.binance.com/api/v3/depth",
+		//	StreamUrl:           "wss://stream.binance.com:9443/stream",
+		//	StreamBufferSize:    5000,
+		//	DeltaQueueSize:      1000,
+		//	RetryMaxAttempts:    10,
+		//	RetryInitialDelayMs: 100,
+		//	RetryMaxDelayMs:     5000,
+		//	BTreeDegree:         32,
+		//	SnapshotQuantity:    20,
+		//},
 		{
 			Name:                "BYBIT",
 			SymbolDiscoveryUrl:  "https://api.bybit.com/v5/market/instruments-info?category=spot&status=Trading",
@@ -116,18 +116,18 @@ func loadExchangeConfigs() []*config.ExchangeConfig {
 			BTreeDegree:         32,
 			SnapshotQuantity:    20,
 		},
-		//{
-		//	Name:                "OKX",
-		//	SymbolDiscoveryUrl:  "https://www.okx.com/api/v5/public/instruments?instType=SPOT",
-		//	StreamUrl:           "wss://ws.okx.com:8443/ws/v5/public",
-		//	StreamBufferSize:    5000,
-		//	DeltaQueueSize:      1000,
-		//	RetryMaxAttempts:    8,
-		//	RetryInitialDelayMs: 200,
-		//	RetryMaxDelayMs:     10000,
-		//	BTreeDegree:         32,
-		//	SnapshotQuantity:    20,
-		//},
+		{
+			Name:                "OKX",
+			SymbolDiscoveryUrl:  "https://www.okx.com/api/v5/public/instruments?instType=SPOT",
+			StreamUrl:           "wss://ws.okx.com:8443/ws/v5/public",
+			StreamBufferSize:    5000,
+			DeltaQueueSize:      1000,
+			RetryMaxAttempts:    8,
+			RetryInitialDelayMs: 200,
+			RetryMaxDelayMs:     10000,
+			BTreeDegree:         32,
+			SnapshotQuantity:    20,
+		},
 	}
 }
 
