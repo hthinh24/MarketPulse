@@ -39,7 +39,6 @@ func (t *TickDataHandler) Start(ctx context.Context) {
 			}
 
 			tickData := &tickEvent.Data
-			t.candleService.ProcessTick(tickData)
 			processResult := t.candleService.ProcessTick(tickData)
 
 			tickCount++

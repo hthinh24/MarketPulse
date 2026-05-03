@@ -28,6 +28,245 @@
       "fieldConfig": {
         "defaults": {
           "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "max": 100,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": 0
+              },
+              {
+                "color": "yellow",
+                "value": 99
+              },
+              {
+                "color": "green",
+                "value": 99.9
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "id": 8,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.4.2",
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "sum(rate(marketpulse_orderbook_events_by_status_total{status=\"applied\", exported_instance=~\"^$instance$\"}[5m]))\r\n/\r\nsum(rate(marketpulse_orderbook_events_by_status_total{status=~\"applied|dropped_gap\", exported_instance=~\"^$instance$\"}[5m]))\r\n* 100",
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Overall Success Rate",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "marketpulse-prometheus-uid"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "id": 7,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.4.2",
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "sum(marketpulse_orderbook_active_symbols{exported_instance=~\"^$instance$\"})",
+          "legendFormat": "Total",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "marketpulse-prometheus-uid"
+          },
+          "editorMode": "code",
+          "expr": "sum by (exchange) (\r\n  marketpulse_orderbook_active_symbols{exported_instance=~\"^$instance$\"}\r\n)",
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "Active Symbols by Exchange",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "marketpulse-prometheus-uid"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "showValues": false,
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "max": 100,
+          "thresholds": {
+            "mode": "percentage",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 99.9
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "id": 5,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "12.4.2",
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "sum by (exchange) (\r\n  rate(marketpulse_orderbook_events_by_status_total{status=\"applied\", exported_instance=~\"^$instance$\"}[1m]))\r\n/\r\nsum by (exchange) (\r\n  rate(marketpulse_orderbook_events_by_status_total{status=~\"applied|dropped_gap\", exported_instance=~\"^$instance$\"}[1m])\r\n)\r\n* 100",
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Success Rate by Exchange",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "marketpulse-prometheus-uid"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
             "mode": "palette-classic"
           },
           "custom": {
@@ -84,8 +323,8 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 0,
-        "y": 0
+        "x": 12,
+        "y": 8
       },
       "id": 1,
       "options": {
@@ -109,7 +348,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum(irate(marketpulse_orderbook_events_total{ exported_instance=~\"^$instance$\"}[2m])) by (status)",
+          "expr": "sum by (exchange) (irate(marketpulse_orderbook_events_by_status_total{exported_instance=~\"^$instance$\", status=\"applied\"}[1m]))",
           "instant": false,
           "legendFormat": "__auto",
           "range": true,
@@ -126,7 +365,138 @@
           "refId": "A"
         }
       ],
-      "title": "TPS",
+      "title": "TPS by Exchange",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "marketpulse-prometheus-uid"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "showValues": false,
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "id": 6,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "12.4.2",
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.5,\r\n  sum by (exchange, le) (\r\n    rate(marketpulse_orderbook_events_latency_ms_bucket{exported_instance=~\"^$instance$\"}[1m])\r\n    )\r\n)",
+          "legendFormat": "p50-{{exchange}}",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "marketpulse-prometheus-uid"
+          },
+          "editorMode": "code",
+          "expr": "",
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "marketpulse-prometheus-uid"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95,\r\n  sum by (exchange, le) (\r\n    rate(marketpulse_orderbook_events_latency_ms_bucket{exported_instance=~\"^$instance$\"}[1m])\r\n    )\r\n)",
+          "instant": false,
+          "legendFormat": "p95-{{exchange}}",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "marketpulse-prometheus-uid"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99,\r\n  sum by (exchange, le) (\r\n    rate(marketpulse_orderbook_events_latency_ms_bucket{exported_instance=~\"^$instance$\"}[1m])\r\n    )\r\n)",
+          "instant": false,
+          "legendFormat": "p99-{{exchange}}",
+          "range": true,
+          "refId": "D"
+        }
+      ],
+      "title": "Latency by Exchange",
       "type": "timeseries"
     },
     {
@@ -195,7 +565,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 0
+        "y": 16
       },
       "id": 3,
       "options": {
@@ -295,9 +665,9 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 8
+        "y": 24
       },
-      "id": 4,
+      "id": 2,
       "options": {
         "legend": {
           "calcs": [],
@@ -319,13 +689,13 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(marketpulse_process_cpu_seconds_total{exported_instance=~\"^$instance$\"}[2m]))",
-          "legendFormat": "CPU Core Usage",
+          "expr": "marketpulse_go_goroutine_count{exported_instance=~\"^$instance$\"}",
+          "legendFormat": "Goroutines",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "CPU Utilization",
+      "title": "Goroutine",
       "type": "timeseries"
     },
     {
@@ -393,9 +763,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 8
+        "y": 24
       },
-      "id": 2,
+      "id": 4,
       "options": {
         "legend": {
           "calcs": [],
@@ -417,13 +787,13 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "marketpulse_go_goroutine_count{exported_instance=~\"^$instance$\"}",
-          "legendFormat": "Goroutines",
+          "expr": "sum(rate(marketpulse_process_cpu_seconds_total{exported_instance=~\"^$instance$\"}[2m]))",
+          "legendFormat": "CPU Core Usage",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Goroutine",
+      "title": "CPU Utilization",
       "type": "timeseries"
     }
   ],
@@ -469,6 +839,6 @@
   "timezone": "browser",
   "title": "MarketPulse-Orderbook",
   "uid": "sdsadsa",
-  "version": 14,
+  "version": 1,
   "weekStart": ""
 }

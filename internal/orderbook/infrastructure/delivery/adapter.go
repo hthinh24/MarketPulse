@@ -2,16 +2,18 @@ package delivery
 
 import (
 	"MarketPulse/internal/orderbook/config"
-	"MarketPulse/internal/orderbook/event"
+	"MarketPulse/internal/orderbook/domain"
 	"MarketPulse/internal/orderbook/infrastructure/delivery/exchange/binance"
+	"MarketPulse/internal/orderbook/infrastructure/delivery/exchange/bybit"
+	"MarketPulse/internal/orderbook/infrastructure/delivery/exchange/okx"
 	"context"
 )
 
+// ExchangeAdapter defines the interface for exchange-specific adapters.
+// Each adapter is responsible for the complete lifecycle: symbol discovery,
+// WebSocket subscription, sequence validation, gap detection, and snapshot management.
 type ExchangeAdapter interface {
-	DiscoverySymbol(ctx context.Context) ([]string, error)
-	FetchSnapshot(ctx context.Context, symbol string) (*event.OrderBookEvent, error)
-	SubscribeOrderBooks(ctx context.Context, symbols []string, deltaChan chan<- event.OrderBookEvent) error
-	GetName() string
+	Start(ctx context.Context, publishChan chan<- *domain.OrderBookSnapshot) error
 }
 
 func NewExchangeAdapter(exchangeConfig *config.ExchangeConfig) ExchangeAdapter {
@@ -20,9 +22,10 @@ func NewExchangeAdapter(exchangeConfig *config.ExchangeConfig) ExchangeAdapter {
 	switch name {
 	case "BINANCE":
 		return binance.NewBinanceAdapter(exchangeConfig)
-	//case "OKX":
-	//	return okx.NewAdapter(exchangeConfig.SnapshotUrl)
-	//case "BYBIT":
+	case "BYBIT":
+		return bybit.NewBybitAdapter(exchangeConfig)
+	case "OKX":
+		return okx.NewOKXAdapter(exchangeConfig)
 	default:
 		panic("Unsupported exchange: " + name)
 	}

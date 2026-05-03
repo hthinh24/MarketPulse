@@ -1,7 +1,7 @@
 package publisher
 
 import (
-	"MarketPulse/internal/orderbook/event"
+	"MarketPulse/internal/orderbook/domain"
 	"context"
 	"fmt"
 	"github.com/bytedance/sonic"
@@ -26,10 +26,10 @@ func NewOrderBookPublisher(redisClient *redis.Client) *OrderBookPublisher {
 	}
 }
 
-func (p *OrderBookPublisher) Start(ctx context.Context, publishChan <-chan *event.OrderBookSnapshot, numOfPublishChannel int) {
-	dispatcherChans := make([]chan *event.OrderBookSnapshot, numOfPublishChannel)
+func (p *OrderBookPublisher) Start(ctx context.Context, publishChan <-chan *domain.OrderBookSnapshot, numOfPublishChannel int) {
+	dispatcherChans := make([]chan *domain.OrderBookSnapshot, numOfPublishChannel)
 	for i := 0; i < numOfPublishChannel; i++ {
-		dispatcherChans[i] = make(chan *event.OrderBookSnapshot, maxBatchSize)
+		dispatcherChans[i] = make(chan *domain.OrderBookSnapshot, maxBatchSize)
 	}
 
 	for i := 0; i < numOfPublishChannel; i++ {
@@ -71,11 +71,11 @@ func (p *OrderBookPublisher) hashSymbol(symbol string) uint32 {
 	return h.Sum32()
 }
 
-func (p *OrderBookPublisher) worker(ctx context.Context, workerChan <-chan *event.OrderBookSnapshot) {
+func (p *OrderBookPublisher) worker(ctx context.Context, workerChan <-chan *domain.OrderBookSnapshot) {
 	ticker := time.NewTicker(tickDuration)
 	defer ticker.Stop()
 
-	batch := make([]*event.OrderBookSnapshot, 0, maxBatchSize)
+	batch := make([]*domain.OrderBookSnapshot, 0, maxBatchSize)
 
 	for {
 		select {
@@ -106,7 +106,7 @@ func (p *OrderBookPublisher) worker(ctx context.Context, workerChan <-chan *even
 	}
 }
 
-func (p *OrderBookPublisher) flush(ctx context.Context, batch []*event.OrderBookSnapshot) []*event.OrderBookSnapshot {
+func (p *OrderBookPublisher) flush(ctx context.Context, batch []*domain.OrderBookSnapshot) []*domain.OrderBookSnapshot {
 	pipe := p.redisClient.Pipeline()
 
 	for _, snapshot := range batch {
@@ -132,8 +132,8 @@ func (p *OrderBookPublisher) flush(ctx context.Context, batch []*event.OrderBook
 	return batch
 }
 
-func (p *OrderBookPublisher) cleanupPool(snapshot *event.OrderBookSnapshot) {
+func (p *OrderBookPublisher) cleanupPool(snapshot *domain.OrderBookSnapshot) {
 	snapshot.Bids = snapshot.Bids[:0]
 	snapshot.Asks = snapshot.Asks[:0]
-	event.SnapshotPool.Put(snapshot)
+	domain.SnapshotPool.Put(snapshot)
 }
