@@ -5,6 +5,7 @@ import (
 	"MarketPulse/internal/orderbook/event"
 	"MarketPulse/internal/orderbook/infrastructure/delivery/exchange/binance"
 	"MarketPulse/internal/orderbook/infrastructure/delivery/exchange/bybit"
+	"MarketPulse/internal/orderbook/infrastructure/delivery/exchange/okx"
 	"context"
 )
 
@@ -23,8 +24,8 @@ func NewExchangeAdapter(exchangeConfig *config.ExchangeConfig) ExchangeAdapter {
 		return binance.NewBinanceAdapter(exchangeConfig)
 	case "BYBIT":
 		return bybit.NewBybitAdapter(exchangeConfig)
-	//case "OKX":
-	//	return okx.NewOkxAdapter(exchangeConfig)
+	case "OKX":
+		return okx.NewOKXAdapter(exchangeConfig)
 	default:
 		panic("Unsupported exchange: " + name)
 	}
