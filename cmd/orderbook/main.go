@@ -2,7 +2,7 @@ package main
 
 import (
 	"MarketPulse/internal/orderbook/config"
-	"MarketPulse/internal/orderbook/event"
+	"MarketPulse/internal/orderbook/domain"
 	"MarketPulse/internal/orderbook/infrastructure/delivery"
 	"MarketPulse/internal/orderbook/infrastructure/publisher"
 	"MarketPulse/internal/telemetry"
@@ -44,7 +44,7 @@ func main() {
 
 	exchangeConfigs := loadExchangeConfigs()
 
-	publishChan := make(chan *event.OrderBookSnapshot, 10000)
+	publishChan := make(chan *domain.OrderBookSnapshot, 10000)
 	numOfPublishChannel := redisConfig.PoolSize
 	redisPublisher := publisher.NewOrderBookPublisher(redisClient)
 

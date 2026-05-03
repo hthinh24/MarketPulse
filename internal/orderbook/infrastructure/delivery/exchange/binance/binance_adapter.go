@@ -2,7 +2,9 @@ package binance
 
 import (
 	"MarketPulse/internal/orderbook/config"
-	"MarketPulse/internal/orderbook/event"
+	"MarketPulse/internal/orderbook/domain"
+	"MarketPulse/internal/orderbook/infrastructure/delivery/event"
+	"MarketPulse/internal/orderbook/infrastructure/observation"
 	"MarketPulse/internal/orderbook/service"
 	"context"
 	"encoding/json"
@@ -35,7 +37,7 @@ type BinanceAdapter struct {
 	mu             sync.RWMutex
 	lastUpdateID   map[string]int64
 	isSynced       map[string]bool
-	deltaQueues    map[string][]event.OrderBookEvent
+	deltaQueues    map[string][]event.EventEnvelope
 	statePerSymbol map[string]*service.OrderBookState
 }
 
@@ -57,14 +59,14 @@ func NewBinanceAdapter(config *config.ExchangeConfig) *BinanceAdapter {
 
 		lastUpdateID:   make(map[string]int64),
 		isSynced:       make(map[string]bool),
-		deltaQueues:    make(map[string][]event.OrderBookEvent),
+		deltaQueues:    make(map[string][]event.EventEnvelope),
 		statePerSymbol: make(map[string]*service.OrderBookState),
 	}
 }
 
 // Start discovers symbols, subscribes to orderbook updates, manages per-symbol state,
 // validates sequences, handles resync with exponential backoff, and emits snapshots.
-func (b *BinanceAdapter) Start(ctx context.Context, publishChan chan<- *event.OrderBookSnapshot) error {
+func (b *BinanceAdapter) Start(ctx context.Context, publishChan chan<- *domain.OrderBookSnapshot) error {
 	log.Printf("Starting BinanceAdapter for exchange: %s", b.name)
 
 	// Discover symbols
@@ -80,7 +82,7 @@ func (b *BinanceAdapter) Start(ctx context.Context, publishChan chan<- *event.Or
 	for _, symbol := range symbols {
 		b.lastUpdateID[symbol] = 0
 		b.isSynced[symbol] = false
-		b.deltaQueues[symbol] = make([]event.OrderBookEvent, 0, b.deltaQueueSize)
+		b.deltaQueues[symbol] = make([]event.EventEnvelope, 0, b.deltaQueueSize)
 
 		state, err := service.NewOrderBookState(b.btreeDegree, b.snapshotQuantity)
 		if err != nil {
@@ -106,7 +108,7 @@ func (b *BinanceAdapter) Start(ctx context.Context, publishChan chan<- *event.Or
 	}
 
 	// Subscribe to WebSocket feed and process updates
-	mainChan := make(chan event.OrderBookEvent, b.streamBufferSize)
+	mainChan := make(chan event.EventEnvelope, b.streamBufferSize)
 	go b.subscribeOrderBooks(ctx, symbols, mainChan)
 
 	// Process incoming updates
@@ -152,7 +154,7 @@ func (b *BinanceAdapter) discoverSymbols(ctx context.Context) ([]string, error) 
 	return symbols, nil
 }
 
-func (b *BinanceAdapter) fetchSnapshot(ctx context.Context, symbol string) (*event.OrderBookEvent, error) {
+func (b *BinanceAdapter) fetchSnapshot(ctx context.Context, symbol string) (*domain.OrderBookEvent, error) {
 	url := fmt.Sprintf("%s?symbol=%s&limit=1000", b.snapshotUrl, strings.ToUpper(symbol))
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -174,7 +176,7 @@ func (b *BinanceAdapter) fetchSnapshot(ctx context.Context, symbol string) (*eve
 		return nil, err
 	}
 
-	orderBookEvent := &event.OrderBookEvent{
+	orderBookEvent := &domain.OrderBookEvent{
 		Exchange:     b.name,
 		Symbol:       symbol,
 		IsSnapshot:   true,
@@ -189,7 +191,7 @@ func (b *BinanceAdapter) fetchSnapshot(ctx context.Context, symbol string) (*eve
 }
 
 // subscribeOrderBooks connects to Binance WebSocket and streams updates.
-func (b *BinanceAdapter) subscribeOrderBooks(ctx context.Context, symbols []string, deltaChan chan<- event.OrderBookEvent) {
+func (b *BinanceAdapter) subscribeOrderBooks(ctx context.Context, symbols []string, deltaChan chan<- event.EventEnvelope) {
 	chunkSize := 300
 
 	for i := 0; i < len(symbols); i += chunkSize {
@@ -204,7 +206,7 @@ func (b *BinanceAdapter) subscribeOrderBooks(ctx context.Context, symbols []stri
 }
 
 // connectAndListenChunk handles a chunk of symbols via WebSocket with reconnection.
-func (b *BinanceAdapter) connectAndListenChunk(ctx context.Context, chunk []string, deltaChan chan<- event.OrderBookEvent) {
+func (b *BinanceAdapter) connectAndListenChunk(ctx context.Context, chunk []string, deltaChan chan<- event.EventEnvelope) {
 	var streams []string
 	for _, symbol := range chunk {
 		streams = append(streams, fmt.Sprintf("%s@depth@100ms", strings.ToLower(symbol)))
@@ -242,7 +244,7 @@ func (b *BinanceAdapter) connectAndListenChunk(ctx context.Context, chunk []stri
 }
 
 // listenAndProcess reads messages from WebSocket and sends them to deltaChan.
-func (b *BinanceAdapter) listenAndProcess(ctx context.Context, conn *websocket.Conn, deltaChan chan<- event.OrderBookEvent) {
+func (b *BinanceAdapter) listenAndProcess(ctx context.Context, conn *websocket.Conn, deltaChan chan<- event.EventEnvelope) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -254,13 +256,18 @@ func (b *BinanceAdapter) listenAndProcess(ctx context.Context, conn *websocket.C
 				return
 			}
 
-			orderBookEvent := b.parseBinanceWSMessage(message)
-			if orderBookEvent == nil {
+			payload := b.parseBinanceWSMessage(message)
+			if payload == nil {
 				continue
 			}
 
+			orderbookEvent := event.EventEnvelope{
+				ReceivedAt: time.Now(),
+				Payload:    *payload,
+			}
+
 			select {
-			case deltaChan <- *orderBookEvent:
+			case deltaChan <- orderbookEvent:
 			case <-ctx.Done():
 				return
 			}
@@ -269,7 +276,7 @@ func (b *BinanceAdapter) listenAndProcess(ctx context.Context, conn *websocket.C
 }
 
 // processUpdates handles incoming orderbook events: sequences validation, queueing, syncing.
-func (b *BinanceAdapter) processUpdates(ctx context.Context, deltaChan <-chan event.OrderBookEvent) {
+func (b *BinanceAdapter) processUpdates(ctx context.Context, deltaChan <-chan event.EventEnvelope) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -285,9 +292,11 @@ func (b *BinanceAdapter) processUpdates(ctx context.Context, deltaChan <-chan ev
 }
 
 // handleUpdate applies sequence validation and state management per symbol.
-func (b *BinanceAdapter) handleUpdate(ctx context.Context, delta event.OrderBookEvent) {
+func (b *BinanceAdapter) handleUpdate(ctx context.Context, orderbookEvent event.EventEnvelope) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
+	delta := orderbookEvent.Payload
 
 	symbol := delta.Symbol
 	state := b.statePerSymbol[symbol]
@@ -309,8 +318,8 @@ func (b *BinanceAdapter) handleUpdate(ctx context.Context, delta event.OrderBook
 			return
 		}
 
-		b.deltaQueues[symbol] = append(b.deltaQueues[symbol], delta)
-		service.UpdateMetric(ctx, "queued")
+		b.deltaQueues[symbol] = append(b.deltaQueues[symbol], orderbookEvent)
+		observation.RecordEvent(ctx, b.name, "queued")
 		return
 	}
 
@@ -319,7 +328,8 @@ func (b *BinanceAdapter) handleUpdate(ctx context.Context, delta event.OrderBook
 		log.Printf("Sequence gap detected for %s: expected %d, got %d", symbol, lastUpdateID+1, delta.PrevUpdateID)
 		b.isSynced[symbol] = false
 		b.deltaQueues[symbol] = b.deltaQueues[symbol][:0]
-		service.UpdateMetric(ctx, "dropped_gap")
+		observation.RecordEvent(ctx, b.name, "dropped_gap")
+		observation.SymbolGapped(ctx, b.name)
 
 		go b.resyncWithBackoff(ctx, symbol)
 		return
@@ -328,7 +338,8 @@ func (b *BinanceAdapter) handleUpdate(ctx context.Context, delta event.OrderBook
 	// Update is valid, apply it
 	state.ApplyUpdate(delta)
 	b.lastUpdateID[symbol] = delta.UpdateID
-	service.UpdateMetric(ctx, "applied")
+	observation.RecordEvent(ctx, b.name, "applied")
+	observation.SampleLatency(ctx, b.name, time.Since(orderbookEvent.ReceivedAt))
 }
 
 func (b *BinanceAdapter) resyncWithBackoff(ctx context.Context, symbol string) {
@@ -358,8 +369,11 @@ func (b *BinanceAdapter) resyncWithBackoff(ctx context.Context, symbol string) {
 			b.lastUpdateID[symbol] = snapshot.UpdateID
 			b.isSynced[symbol] = true
 
+			observation.SymbolSynced(ctx, b.name)
+
 			// Apply queued deltas that are newer than snapshot
-			for _, delta := range b.deltaQueues[symbol] {
+			for _, orderbookEvent := range b.deltaQueues[symbol] {
+				delta := orderbookEvent.Payload
 				if delta.UpdateID > snapshot.UpdateID {
 					state.ApplyUpdate(delta)
 					b.lastUpdateID[symbol] = delta.UpdateID
@@ -376,7 +390,7 @@ func (b *BinanceAdapter) resyncWithBackoff(ctx context.Context, symbol string) {
 	log.Printf("Resync failed for %s after %d attempts, will retry on next gap detection or initial resync", symbol, b.retryMaxAttempts)
 }
 
-func (b *BinanceAdapter) parseBinanceWSMessage(message []byte) *event.OrderBookEvent {
+func (b *BinanceAdapter) parseBinanceWSMessage(message []byte) *domain.OrderBookEvent {
 	var binanceDepthUpdateStream BinanceDepthUpdateStream
 	if err := json.Unmarshal(message, &binanceDepthUpdateStream); err != nil {
 		log.Printf("JSON unmarshal error: %v", err)
@@ -384,7 +398,7 @@ func (b *BinanceAdapter) parseBinanceWSMessage(message []byte) *event.OrderBookE
 	}
 
 	binanceDepthUpdate := binanceDepthUpdateStream.Data
-	orderBookEvent := &event.OrderBookEvent{
+	orderBookEvent := &domain.OrderBookEvent{
 		Exchange:     b.name,
 		Symbol:       binanceDepthUpdate.Symbol,
 		IsSnapshot:   false,
@@ -398,8 +412,8 @@ func (b *BinanceAdapter) parseBinanceWSMessage(message []byte) *event.OrderBookE
 	return orderBookEvent
 }
 
-func (b *BinanceAdapter) convertToOrderLevels(priceSizePairs [][]string) []event.OrderLevel {
-	var orderLevels []event.OrderLevel
+func (b *BinanceAdapter) convertToOrderLevels(priceSizePairs [][]string) []domain.OrderLevel {
+	var orderLevels []domain.OrderLevel
 	for _, pair := range priceSizePairs {
 		price, err1 := strconv.ParseFloat(pair[0], 64)
 		size, err2 := strconv.ParseFloat(pair[1], 64)
@@ -408,7 +422,7 @@ func (b *BinanceAdapter) convertToOrderLevels(priceSizePairs [][]string) []event
 			continue
 		}
 
-		orderLevels = append(orderLevels, event.OrderLevel{
+		orderLevels = append(orderLevels, domain.OrderLevel{
 			Price: price,
 			Size:  size,
 		})

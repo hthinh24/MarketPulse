@@ -2,7 +2,9 @@ package okx
 
 import (
 	"MarketPulse/internal/orderbook/config"
-	"MarketPulse/internal/orderbook/event"
+	"MarketPulse/internal/orderbook/domain"
+	"MarketPulse/internal/orderbook/infrastructure/delivery/event"
+	"MarketPulse/internal/orderbook/infrastructure/observation"
 	"MarketPulse/internal/orderbook/service"
 	"context"
 	"encoding/json"
@@ -26,7 +28,7 @@ type OKXAdapter struct {
 	mu          sync.RWMutex
 	lastSeqId   map[string]int64
 	isSynced    map[string]bool
-	deltaQueues map[string][]OKXOrderBookData
+	deltaQueues map[string][]event.EventEnvelope
 
 	// Re-subscribe mechanism
 	resyncChan chan string // signal symbol needs re-subscribe
@@ -43,7 +45,7 @@ func NewOKXAdapter(config *config.ExchangeConfig) *OKXAdapter {
 
 		lastSeqId:   make(map[string]int64),
 		isSynced:    make(map[string]bool),
-		deltaQueues: make(map[string][]OKXOrderBookData),
+		deltaQueues: make(map[string][]event.EventEnvelope),
 
 		resyncChan: make(chan string, 100),
 	}
@@ -52,7 +54,7 @@ func NewOKXAdapter(config *config.ExchangeConfig) *OKXAdapter {
 // Start discovers symbols, subscribes to orderbook updates, manages per-symbol state,
 // validates sequences, and handles snapshot/delta flow specific to OKX protocol.
 // Includes re-subscribe mechanism on gap detection and heartbeat for connection keep-alive.
-func (o *OKXAdapter) Start(ctx context.Context, publishChan chan<- *event.OrderBookSnapshot) error {
+func (o *OKXAdapter) Start(ctx context.Context, publishChan chan<- *domain.OrderBookSnapshot) error {
 	log.Printf("Starting OKXAdapter for exchange: %s", o.name)
 
 	// Discover symbols
@@ -69,7 +71,7 @@ func (o *OKXAdapter) Start(ctx context.Context, publishChan chan<- *event.OrderB
 	for _, symbol := range symbols {
 		o.lastSeqId[symbol] = 0
 		o.isSynced[symbol] = false
-		o.deltaQueues[symbol] = make([]OKXOrderBookData, 0, 100)
+		o.deltaQueues[symbol] = make([]event.EventEnvelope, 0, 100)
 
 		state, err := service.NewOrderBookState(o.btreeDegree, o.snapshotQuantity)
 		if err != nil {
@@ -322,83 +324,85 @@ func (o *OKXAdapter) listenAndProcess(ctx context.Context, conn *websocket.Conn,
 				continue
 			}
 
-			// Dispatch to handlers (OKX sends data as array with single element for books)
+			payload := domain.OrderBookEvent{
+				Exchange:     o.name,
+				Symbol:       instId,
+				IsSnapshot:   msg.Action == "snapshot",
+				UpdateID:     msg.Data[0].SeqId,
+				PrevUpdateID: msg.Data[0].PrevSeqId,
+				Timestamp:    time.Now().UnixMilli(),
+				Bids:         o.convertToOrderLevels(msg.Data[0].Bids),
+				Asks:         o.convertToOrderLevels(msg.Data[0].Asks),
+			}
+
+			envelope := event.EventEnvelope{
+				ReceivedAt: time.Now(),
+				Payload:    payload,
+			}
+
 			switch msg.Action {
 			case "snapshot":
-				o.handleSnapshot(instId, msg.Data[0], state)
+				o.handleSnapshot(ctx, envelope, state)
 			case "update":
-				o.handleDelta(instId, msg.Data[0], state)
+				o.handleDelta(ctx, envelope, state)
 			}
 		}
 	}
 }
 
 // handleSnapshot processes a snapshot message from OKX.
-func (o *OKXAdapter) handleSnapshot(instId string, data OKXOrderBookData, state *service.OrderBookState) {
+func (o *OKXAdapter) handleSnapshot(ctx context.Context, envelope event.EventEnvelope, state *service.OrderBookState) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
-	ev := event.OrderBookEvent{
-		Exchange:     o.name,
-		Symbol:       instId,
-		IsSnapshot:   true,
-		UpdateID:     data.SeqId,
-		PrevUpdateID: 0,
-		Timestamp:    time.Now().UnixMilli(),
-		Bids:         o.convertToOrderLevels(data.Bids),
-		Asks:         o.convertToOrderLevels(data.Asks),
-	}
+	delta := envelope.Payload
+	instId := delta.Symbol
 
-	state.ApplySnapshot(ev)
+	state.ApplySnapshot(delta)
 
-	o.lastSeqId[instId] = data.SeqId
+	o.lastSeqId[instId] = delta.UpdateID
 	o.isSynced[instId] = true
 
 	// Apply any queued deltas that are newer than this snapshot
 	if queued, exists := o.deltaQueues[instId]; exists && len(queued) > 0 {
-		for _, delta := range queued {
-			if delta.SeqId > data.SeqId {
-				deltaEv := event.OrderBookEvent{
-					Exchange:     o.name,
-					Symbol:       instId,
-					IsSnapshot:   false,
-					UpdateID:     delta.SeqId,
-					PrevUpdateID: delta.SeqId - 1,
-					Timestamp:    time.Now().UnixMilli(),
-					Bids:         o.convertToOrderLevels(delta.Bids),
-					Asks:         o.convertToOrderLevels(delta.Asks),
-				}
-				state.ApplyUpdate(deltaEv)
-				o.lastSeqId[instId] = delta.SeqId
+		for _, queuedEnvelope := range queued {
+			queuedDelta := queuedEnvelope.Payload
+			if queuedDelta.UpdateID > delta.UpdateID {
+				state.ApplyUpdate(queuedDelta)
+				o.lastSeqId[instId] = queuedDelta.UpdateID
 			}
 		}
 		o.deltaQueues[instId] = o.deltaQueues[instId][:0]
 	}
 
-	log.Printf("Snapshot applied for %s (SeqId: %d)", instId, data.SeqId)
+	observation.SymbolSynced(ctx, o.name)
+	log.Printf("Snapshot applied for %s (SeqId: %d)", instId, delta.UpdateID)
 }
 
 // handleDelta processes delta (update) messages with gap detection via prevSeqId.
-func (o *OKXAdapter) handleDelta(instId string, data OKXOrderBookData, state *service.OrderBookState) {
+func (o *OKXAdapter) handleDelta(ctx context.Context, envelope event.EventEnvelope, state *service.OrderBookState) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
+	delta := envelope.Payload
+	instId := delta.Symbol
 	isSynced := o.isSynced[instId]
 	lastSeqId := o.lastSeqId[instId]
 
 	if !isSynced {
 		// Not synced: queue delta until snapshot received
-		o.deltaQueues[instId] = append(o.deltaQueues[instId], data)
-		service.UpdateMetric(context.Background(), "queued")
+		o.deltaQueues[instId] = append(o.deltaQueues[instId], envelope)
+		observation.RecordEvent(ctx, o.name, "queued")
 		return
 	}
 
 	// OKX gap detection: prevSeqId should match lastSeqId
-	if data.PrevSeqId != lastSeqId {
-		log.Printf("Sequence gap detected for %s: expected prevSeqId=%d, got %d", instId, lastSeqId, data.PrevSeqId)
+	if delta.PrevUpdateID != lastSeqId {
+		log.Printf("Sequence gap detected for %s: expected prevSeqId=%d, got %d", instId, lastSeqId, delta.PrevUpdateID)
 		o.isSynced[instId] = false
 		o.deltaQueues[instId] = o.deltaQueues[instId][:0]
-		service.UpdateMetric(context.Background(), "dropped_gap")
+		observation.RecordEvent(ctx, o.name, "dropped_gap")
+		observation.SymbolGapped(ctx, o.name)
 
 		// Signal re-subscribe to trigger snapshot
 		select {
@@ -408,26 +412,16 @@ func (o *OKXAdapter) handleDelta(instId string, data OKXOrderBookData, state *se
 		return
 	}
 
-	ev := event.OrderBookEvent{
-		Exchange:     o.name,
-		Symbol:       instId,
-		IsSnapshot:   false,
-		UpdateID:     data.SeqId,
-		PrevUpdateID: data.PrevSeqId,
-		Timestamp:    time.Now().UnixMilli(),
-		Bids:         o.convertToOrderLevels(data.Bids),
-		Asks:         o.convertToOrderLevels(data.Asks),
-	}
-
-	state.ApplyUpdate(ev)
-	o.lastSeqId[instId] = data.SeqId
-	service.UpdateMetric(context.Background(), "applied")
+	state.ApplyUpdate(delta)
+	o.lastSeqId[instId] = delta.UpdateID
+	observation.RecordEvent(ctx, o.name, "applied")
+	observation.SampleLatency(ctx, o.name, time.Since(envelope.ReceivedAt))
 }
 
 // convertToOrderLevels converts OKX price/size pairs to OrderLevel structs.
 // OKX returns [price, size, deprecated, numOrders] — we only use first two.
-func (o *OKXAdapter) convertToOrderLevels(levels [][]string) []event.OrderLevel {
-	var orderLevels []event.OrderLevel
+func (o *OKXAdapter) convertToOrderLevels(levels [][]string) []domain.OrderLevel {
+	var orderLevels []domain.OrderLevel
 	for _, level := range levels {
 		if len(level) < 2 {
 			continue
@@ -438,7 +432,7 @@ func (o *OKXAdapter) convertToOrderLevels(levels [][]string) []event.OrderLevel 
 			log.Printf("Error parsing price/size: %v, %v", err1, err2)
 			continue
 		}
-		orderLevels = append(orderLevels, event.OrderLevel{
+		orderLevels = append(orderLevels, domain.OrderLevel{
 			Price: price,
 			Size:  size,
 		})

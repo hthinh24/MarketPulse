@@ -2,7 +2,9 @@ package bybit
 
 import (
 	"MarketPulse/internal/orderbook/config"
-	"MarketPulse/internal/orderbook/event"
+	"MarketPulse/internal/orderbook/domain"
+	"MarketPulse/internal/orderbook/infrastructure/delivery/event"
+	"MarketPulse/internal/orderbook/infrastructure/observation"
 	"MarketPulse/internal/orderbook/service"
 	"context"
 	"encoding/json"
@@ -27,7 +29,7 @@ type BybitAdapter struct {
 	mu           sync.RWMutex
 	lastUpdateID map[string]int64
 	isSynced     map[string]bool
-	deltaQueues  map[string][]BybitWSOrderBookData
+	deltaQueues  map[string][]event.EventEnvelope
 
 	resyncChan chan string
 	writeMu    sync.Mutex
@@ -44,7 +46,7 @@ func NewBybitAdapter(config *config.ExchangeConfig) *BybitAdapter {
 
 		lastUpdateID: make(map[string]int64),
 		isSynced:     make(map[string]bool),
-		deltaQueues:  make(map[string][]BybitWSOrderBookData),
+		deltaQueues:  make(map[string][]event.EventEnvelope),
 
 		resyncChan: make(chan string, 100),
 	}
@@ -53,7 +55,7 @@ func NewBybitAdapter(config *config.ExchangeConfig) *BybitAdapter {
 // Start discovers symbols, subscribes to orderbook updates, manages per-symbol state,
 // validates sequences, and handles snapshot/delta flow specific to Bybit protocol.
 // Includes re-subscribe mechanism on gap detection.
-func (b *BybitAdapter) Start(ctx context.Context, publishChan chan<- *event.OrderBookSnapshot) error {
+func (b *BybitAdapter) Start(ctx context.Context, publishChan chan<- *domain.OrderBookSnapshot) error {
 	log.Printf("Starting BybitAdapter for exchange: %s", b.name)
 
 	// Discover symbols
@@ -70,7 +72,7 @@ func (b *BybitAdapter) Start(ctx context.Context, publishChan chan<- *event.Orde
 	for _, symbol := range symbols {
 		b.lastUpdateID[symbol] = 0
 		b.isSynced[symbol] = false
-		b.deltaQueues[symbol] = make([]BybitWSOrderBookData, 0, 100)
+		b.deltaQueues[symbol] = make([]event.EventEnvelope, 0, 100)
 
 		state, err := service.NewOrderBookState(b.btreeDegree, b.snapshotQuantity)
 		if err != nil {
@@ -266,84 +268,83 @@ func (b *BybitAdapter) listenAndProcess(ctx context.Context, conn *websocket.Con
 				continue
 			}
 
+			payload := domain.OrderBookEvent{
+				Exchange:     b.name,
+				Symbol:       msg.Data.S,
+				IsSnapshot:   msg.Type == "snapshot",
+				UpdateID:     msg.Data.U,
+				PrevUpdateID: msg.Data.U - 1,
+				Timestamp:    time.Now().UnixMilli(),
+				Bids:         b.convertToOrderLevels(msg.Data.B),
+				Asks:         b.convertToOrderLevels(msg.Data.A),
+			}
+
+			envelope := event.EventEnvelope{
+				ReceivedAt: time.Now(),
+				Payload:    payload,
+			}
+
 			switch msg.Type {
 			case "snapshot":
-				b.handleSnapshot(msg.Data, state)
+				b.handleSnapshot(ctx, envelope, state)
 			case "delta":
-				b.handleDelta(msg.Data, state)
+				b.handleDelta(ctx, envelope, state)
 			}
 		}
 	}
 }
 
 // handleSnapshot processes a snapshot message from Bybit.
-func (b *BybitAdapter) handleSnapshot(data BybitWSOrderBookData, state *service.OrderBookState) {
+func (b *BybitAdapter) handleSnapshot(ctx context.Context, envelope event.EventEnvelope, state *service.OrderBookState) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	symbol := data.S
+	delta := envelope.Payload
+	symbol := delta.Symbol
 
-	ev := event.OrderBookEvent{
-		Exchange:     b.name,
-		Symbol:       symbol,
-		IsSnapshot:   true,
-		UpdateID:     data.U,
-		PrevUpdateID: 0,
-		Timestamp:    time.Now().UnixMilli(),
-		Bids:         b.convertToOrderLevels(data.B),
-		Asks:         b.convertToOrderLevels(data.A),
-	}
+	state.ApplySnapshot(delta)
 
-	state.ApplySnapshot(ev)
-
-	b.lastUpdateID[symbol] = data.U
+	b.lastUpdateID[symbol] = delta.UpdateID
 	b.isSynced[symbol] = true
 
 	if queued, exists := b.deltaQueues[symbol]; exists && len(queued) > 0 {
-		for _, delta := range queued {
-			if delta.U > data.U {
-				deltaEv := event.OrderBookEvent{
-					Exchange:     b.name,
-					Symbol:       symbol,
-					IsSnapshot:   false,
-					UpdateID:     delta.U,
-					PrevUpdateID: delta.U - 1,
-					Timestamp:    time.Now().UnixMilli(),
-					Bids:         b.convertToOrderLevels(delta.B),
-					Asks:         b.convertToOrderLevels(delta.A),
-				}
-				state.ApplyUpdate(deltaEv)
-				b.lastUpdateID[symbol] = delta.U
+		for _, queuedEnvelope := range queued {
+			queuedDelta := queuedEnvelope.Payload
+			if queuedDelta.UpdateID > delta.UpdateID {
+				state.ApplyUpdate(queuedDelta)
+				b.lastUpdateID[symbol] = queuedDelta.UpdateID
 			}
 		}
 		b.deltaQueues[symbol] = b.deltaQueues[symbol][:0]
 	}
 
-	log.Printf("Snapshot applied for %s (UpdateID: %d)", symbol, data.U)
+	observation.SymbolSynced(ctx, b.name)
+	log.Printf("Snapshot applied for %s (UpdateID: %d)", symbol, delta.UpdateID)
 }
 
 // handleDelta processes delta messages with gap detection and re-subscribe signaling.
-func (b *BybitAdapter) handleDelta(data BybitWSOrderBookData, state *service.OrderBookState) {
+func (b *BybitAdapter) handleDelta(ctx context.Context, envelope event.EventEnvelope, state *service.OrderBookState) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	symbol := data.S
+	delta := envelope.Payload
+	symbol := delta.Symbol
 	isSynced := b.isSynced[symbol]
 	lastUpdateID := b.lastUpdateID[symbol]
 
 	if !isSynced {
 		// Not synced: queue delta until snapshot received
-		b.deltaQueues[symbol] = append(b.deltaQueues[symbol], data)
-		service.UpdateMetric(context.Background(), "queued")
+		b.deltaQueues[symbol] = append(b.deltaQueues[symbol], envelope)
+		observation.RecordEvent(ctx, b.name, "queued")
 		return
 	}
 
 	// Service restart signal
-	if data.U == 1 {
+	if delta.UpdateID == 1 {
 		log.Printf("Service restart signal received for %s (u=1)", symbol)
 		b.isSynced[symbol] = false
 		b.deltaQueues[symbol] = b.deltaQueues[symbol][:0]
-		service.UpdateMetric(context.Background(), "dropped_service_restart")
+		observation.RecordEvent(ctx, b.name, "dropped_service_restart")
 
 		select {
 		case b.resyncChan <- symbol:
@@ -353,11 +354,12 @@ func (b *BybitAdapter) handleDelta(data BybitWSOrderBookData, state *service.Ord
 	}
 
 	// Check for sequence gap
-	if data.U != lastUpdateID+1 {
-		log.Printf("Sequence gap detected for %s: expected %d, got %d", symbol, lastUpdateID+1, data.U)
+	if delta.PrevUpdateID > lastUpdateID+1 {
+		log.Printf("Sequence gap detected for %s: expected %d, got %d", symbol, lastUpdateID+1, delta.PrevUpdateID)
 		b.isSynced[symbol] = false
 		b.deltaQueues[symbol] = b.deltaQueues[symbol][:0]
-		service.UpdateMetric(context.Background(), "dropped_gap")
+		observation.RecordEvent(ctx, b.name, "dropped_gap")
+		observation.SymbolGapped(ctx, b.name)
 
 		select {
 		case b.resyncChan <- symbol:
@@ -366,25 +368,15 @@ func (b *BybitAdapter) handleDelta(data BybitWSOrderBookData, state *service.Ord
 		return
 	}
 
-	ev := event.OrderBookEvent{
-		Exchange:     b.name,
-		Symbol:       symbol,
-		IsSnapshot:   false,
-		UpdateID:     data.U,
-		PrevUpdateID: data.U - 1,
-		Timestamp:    time.Now().UnixMilli(),
-		Bids:         b.convertToOrderLevels(data.B),
-		Asks:         b.convertToOrderLevels(data.A),
-	}
-
-	state.ApplyUpdate(ev)
-	b.lastUpdateID[symbol] = data.U
-	service.UpdateMetric(context.Background(), "applied")
+	state.ApplyUpdate(delta)
+	b.lastUpdateID[symbol] = delta.UpdateID
+	observation.RecordEvent(ctx, b.name, "applied")
+	observation.SampleLatency(ctx, b.name, time.Since(envelope.ReceivedAt))
 }
 
 // convertToOrderLevels converts string price/size pairs to OrderLevel structs.
-func (b *BybitAdapter) convertToOrderLevels(priceSizePairs [][]string) []event.OrderLevel {
-	var orderLevels []event.OrderLevel
+func (b *BybitAdapter) convertToOrderLevels(priceSizePairs [][]string) []domain.OrderLevel {
+	var orderLevels []domain.OrderLevel
 	for _, pair := range priceSizePairs {
 		if len(pair) < 2 {
 			continue
@@ -395,7 +387,7 @@ func (b *BybitAdapter) convertToOrderLevels(priceSizePairs [][]string) []event.O
 			log.Printf("Error parsing price/size: %v, %v", err1, err2)
 			continue
 		}
-		orderLevels = append(orderLevels, event.OrderLevel{
+		orderLevels = append(orderLevels, domain.OrderLevel{
 			Price: price,
 			Size:  size,
 		})
