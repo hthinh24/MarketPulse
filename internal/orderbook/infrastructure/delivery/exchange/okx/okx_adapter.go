@@ -18,42 +18,32 @@ import (
 )
 
 type OKXAdapter struct {
-	name               string
-	symbolDiscoveryUrl string
-	streamUrl          string
-	btreeDegree        int
-	snapshotQuantity   int
-
-	// Per-symbol sequence state tracking
-	mu          sync.RWMutex
-	lastSeqId   map[string]int64
-	isSynced    map[string]bool
-	deltaQueues map[string][]event.EventEnvelope
-
-	// Re-subscribe mechanism
-	resyncChan chan string // signal symbol needs re-subscribe
-	writeMu    sync.Mutex  // protect concurrent WriteJSON
+	name                   string
+	symbolDiscoveryUrl     string
+	streamUrl              string
+	streamBufferSize       int
+	symbolWorkerBufferSize int
+	deltaQueueSize         int
+	btreeDegree            int
+	snapshotQuantity       int
+	writeMu                sync.Mutex // protect concurrent WriteJSON
 }
 
 func NewOKXAdapter(config *config.ExchangeConfig) *OKXAdapter {
 	return &OKXAdapter{
-		name:               config.Name,
-		symbolDiscoveryUrl: config.SymbolDiscoveryUrl,
-		streamUrl:          config.StreamUrl,
-		btreeDegree:        config.BTreeDegree,
-		snapshotQuantity:   config.SnapshotQuantity,
-
-		lastSeqId:   make(map[string]int64),
-		isSynced:    make(map[string]bool),
-		deltaQueues: make(map[string][]event.EventEnvelope),
-
-		resyncChan: make(chan string, 100),
+		name:                   config.Name,
+		symbolDiscoveryUrl:     config.SymbolDiscoveryUrl,
+		streamUrl:              config.StreamUrl,
+		streamBufferSize:       config.StreamBufferSize,
+		symbolWorkerBufferSize: config.StreamBufferSize,
+		deltaQueueSize:         config.DeltaQueueSize,
+		btreeDegree:            config.BTreeDegree,
+		snapshotQuantity:       config.SnapshotQuantity,
 	}
 }
 
-// Start discovers symbols, subscribes to orderbook updates, manages per-symbol state,
-// validates sequences, and handles snapshot/delta flow specific to OKX protocol.
-// Includes re-subscribe mechanism on gap detection and heartbeat for connection keep-alive.
+// Start discovers symbols, creates per-symbol workers, subscribes to WebSocket feed,
+// dispatches events to workers, and handles re-subscribe requests from workers.
 func (o *OKXAdapter) Start(ctx context.Context, publishChan chan<- *domain.OrderBookSnapshot) error {
 	log.Printf("Starting OKXAdapter for exchange: %s", o.name)
 
@@ -65,31 +55,27 @@ func (o *OKXAdapter) Start(ctx context.Context, publishChan chan<- *domain.Order
 	}
 	log.Printf("Discovered %d symbols on %s", len(symbols), o.name)
 
-	// Initialize per-symbol state
-	o.mu.Lock()
-	statePerSymbol := make(map[string]*service.OrderBookState)
-	for _, symbol := range symbols {
-		o.lastSeqId[symbol] = 0
-		o.isSynced[symbol] = false
-		o.deltaQueues[symbol] = make([]event.EventEnvelope, 0, 100)
+	// resyncChan: workers signal dispatcher which symbol needs re-subscription
+	resyncChan := make(chan string, len(symbols))
 
+	// Create one worker + one channel per symbol to maintain their own order book state
+	workerChans := make(map[string]chan event.EventEnvelope, len(symbols))
+	for _, symbol := range symbols {
 		state, err := service.NewOrderBookState(o.btreeDegree, o.snapshotQuantity)
 		if err != nil {
-			o.mu.Unlock()
 			log.Printf("Failed to create OrderBookState for symbol %s: %v", symbol, err)
 			return err
 		}
-		statePerSymbol[symbol] = state
-	}
-	o.mu.Unlock()
 
-	// Start emitters for each symbol
-	for _, symbol := range symbols {
-		go func(sym string) {
-			state := statePerSymbol[sym]
-			state.RunEmitter(ctx, o.name, sym, publishChan)
-		}(symbol)
+		ch := make(chan event.EventEnvelope, o.symbolWorkerBufferSize)
+		workerChans[symbol] = ch
+
+		worker := newOKXSymbolWorker(o.name, symbol, o.deltaQueueSize, state, ch, resyncChan)
+		go worker.run(ctx, publishChan)
 	}
+
+	// Subscribe to WebSocket feed and process updates
+	mainChan := make(chan event.EventEnvelope, o.streamBufferSize)
 
 	// Chunk symbols into groups (OKX allows ~10 channels per connection)
 	chunkSize := 10
@@ -100,12 +86,26 @@ func (o *OKXAdapter) Start(ctx context.Context, publishChan chan<- *domain.Order
 		}
 
 		chunk := symbols[i:end]
-		go o.connectAndListen(ctx, chunk, statePerSymbol)
+
+		// Wait 20ms increments between goroutines
+		go func(idx int) {
+			jitter := time.Duration(idx) * 20 * time.Millisecond
+			select {
+			case <-time.After(jitter):
+			case <-ctx.Done():
+				return
+			}
+			o.connectAndListen(ctx, chunk, mainChan, resyncChan)
+		}(i / chunkSize)
 	}
+
+	// Dispatch incoming events to workers
+	go o.dispatch(ctx, mainChan, workerChans)
 
 	// Wait for context cancellation
 	<-ctx.Done()
 	log.Printf("OKXAdapter shutting down gracefully...")
+	close(mainChan)
 	return nil
 }
 
@@ -145,9 +145,36 @@ func (o *OKXAdapter) discoverSymbols(ctx context.Context) ([]string, error) {
 	return symbols, nil
 }
 
+// dispatch routes WS events to the correct worker.
+func (o *OKXAdapter) dispatch(
+	ctx context.Context,
+	mainChan <-chan event.EventEnvelope,
+	workerChans map[string]chan event.EventEnvelope,
+) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case envelope, ok := <-mainChan:
+			if !ok {
+				return
+			}
+			sym := envelope.Payload.Symbol
+			if ch, exists := workerChans[sym]; exists {
+				select {
+				case ch <- envelope:
+				default:
+					observation.RecordEvent(ctx, o.name, "dropped_queue_full")
+					log.Printf("Warning: Dropping order book event for %s due to full channel buffer", sym)
+				}
+			}
+		}
+	}
+}
+
 // connectAndListen connects to OKX WebSocket and handles subscription with re-subscribe on gap.
 // Runs heartbeat, re-subscribe, and message listening in parallel on same connection.
-func (o *OKXAdapter) connectAndListen(ctx context.Context, symbols []string, statePerSymbol map[string]*service.OrderBookState) {
+func (o *OKXAdapter) connectAndListen(ctx context.Context, symbols []string, mainChan chan<- event.EventEnvelope, resyncChan <-chan string) {
 	// Build instId map: instId → OKXWSArg object
 	instIdMap := make(map[string]OKXWSArg)
 	for _, symbol := range symbols {
@@ -184,6 +211,7 @@ func (o *OKXAdapter) connectAndListen(ctx context.Context, symbols []string, sta
 		}
 
 		// Heartbeat goroutine — send ping every 25s (OKX closes after 30s inactivity)
+		// Runs independently, doesn't need resyncChan
 		stopHeartbeat := make(chan struct{})
 		go func() {
 			ticker := time.NewTicker(25 * time.Second)
@@ -203,14 +231,12 @@ func (o *OKXAdapter) connectAndListen(ctx context.Context, symbols []string, sta
 		}()
 
 		// Re-subscribe goroutine — handles gap recovery
-		stopResync := make(chan struct{})
 		go func() {
-			defer close(stopResync)
 			for {
 				select {
 				case <-ctx.Done():
 					return
-				case instId, ok := <-o.resyncChan:
+				case instId, ok := <-resyncChan:
 					if !ok {
 						return
 					}
@@ -237,7 +263,7 @@ func (o *OKXAdapter) connectAndListen(ctx context.Context, symbols []string, sta
 		}()
 
 		// Listen and process messages until connection dies
-		o.listenAndProcess(ctx, conn, statePerSymbol)
+		o.listenAndProcess(ctx, conn, mainChan)
 
 		close(stopHeartbeat)
 		conn.Close()
@@ -276,8 +302,8 @@ func (o *OKXAdapter) sendUnsubscribe(conn *websocket.Conn, instId string) error 
 	return conn.WriteJSON(msg)
 }
 
-// listenAndProcess reads WebSocket messages and dispatches to handlers.
-func (o *OKXAdapter) listenAndProcess(ctx context.Context, conn *websocket.Conn, statePerSymbol map[string]*service.OrderBookState) {
+// listenAndProcess reads WebSocket messages and sends them to mainChan as envelopes.
+func (o *OKXAdapter) listenAndProcess(ctx context.Context, conn *websocket.Conn, mainChan chan<- event.EventEnvelope) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -319,10 +345,6 @@ func (o *OKXAdapter) listenAndProcess(ctx context.Context, conn *websocket.Conn,
 			}
 
 			instId := msg.Arg.InstId
-			state, exists := statePerSymbol[instId]
-			if !exists {
-				continue
-			}
 
 			payload := domain.OrderBookEvent{
 				Exchange:     o.name,
@@ -340,82 +362,13 @@ func (o *OKXAdapter) listenAndProcess(ctx context.Context, conn *websocket.Conn,
 				Payload:    payload,
 			}
 
-			switch msg.Action {
-			case "snapshot":
-				o.handleSnapshot(ctx, envelope, state)
-			case "update":
-				o.handleDelta(ctx, envelope, state)
+			select {
+			case mainChan <- envelope:
+			case <-ctx.Done():
+				return
 			}
 		}
 	}
-}
-
-// handleSnapshot processes a snapshot message from OKX.
-func (o *OKXAdapter) handleSnapshot(ctx context.Context, envelope event.EventEnvelope, state *service.OrderBookState) {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-
-	delta := envelope.Payload
-	instId := delta.Symbol
-
-	state.ApplySnapshot(delta)
-
-	o.lastSeqId[instId] = delta.UpdateID
-	o.isSynced[instId] = true
-
-	// Apply any queued deltas that are newer than this snapshot
-	if queued, exists := o.deltaQueues[instId]; exists && len(queued) > 0 {
-		for _, queuedEnvelope := range queued {
-			queuedDelta := queuedEnvelope.Payload
-			if queuedDelta.UpdateID > delta.UpdateID {
-				state.ApplyUpdate(queuedDelta)
-				o.lastSeqId[instId] = queuedDelta.UpdateID
-			}
-		}
-		o.deltaQueues[instId] = o.deltaQueues[instId][:0]
-	}
-
-	observation.SymbolSynced(ctx, o.name)
-	log.Printf("Snapshot applied for %s (SeqId: %d)", instId, delta.UpdateID)
-}
-
-// handleDelta processes delta (update) messages with gap detection via prevSeqId.
-func (o *OKXAdapter) handleDelta(ctx context.Context, envelope event.EventEnvelope, state *service.OrderBookState) {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-
-	delta := envelope.Payload
-	instId := delta.Symbol
-	isSynced := o.isSynced[instId]
-	lastSeqId := o.lastSeqId[instId]
-
-	if !isSynced {
-		// Not synced: queue delta until snapshot received
-		o.deltaQueues[instId] = append(o.deltaQueues[instId], envelope)
-		observation.RecordEvent(ctx, o.name, "queued")
-		return
-	}
-
-	// OKX gap detection: prevSeqId should match lastSeqId
-	if delta.PrevUpdateID != lastSeqId {
-		log.Printf("Sequence gap detected for %s: expected prevSeqId=%d, got %d", instId, lastSeqId, delta.PrevUpdateID)
-		o.isSynced[instId] = false
-		o.deltaQueues[instId] = o.deltaQueues[instId][:0]
-		observation.RecordEvent(ctx, o.name, "dropped_gap")
-		observation.SymbolGapped(ctx, o.name)
-
-		// Signal re-subscribe to trigger snapshot
-		select {
-		case o.resyncChan <- instId:
-		default:
-		}
-		return
-	}
-
-	state.ApplyUpdate(delta)
-	o.lastSeqId[instId] = delta.UpdateID
-	observation.RecordEvent(ctx, o.name, "applied")
-	observation.SampleLatency(ctx, o.name, time.Since(envelope.ReceivedAt))
 }
 
 // convertToOrderLevels converts OKX price/size pairs to OrderLevel structs.

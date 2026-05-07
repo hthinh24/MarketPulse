@@ -18,43 +18,34 @@ import (
 )
 
 type BybitAdapter struct {
-	name               string
-	symbolDiscoveryUrl string
-	snapshotUrl        string
-	streamUrl          string
-	btreeDegree        int
-	snapshotQuantity   int
-
-	// Per-symbol sequence state tracking
-	mu           sync.RWMutex
-	lastUpdateID map[string]int64
-	isSynced     map[string]bool
-	deltaQueues  map[string][]event.EventEnvelope
-
-	resyncChan chan string
-	writeMu    sync.Mutex
+	name                   string
+	symbolDiscoveryUrl     string
+	snapshotUrl            string
+	streamUrl              string
+	streamBufferSize       int
+	symbolWorkerBufferSize int
+	deltaQueueSize         int
+	btreeDegree            int
+	snapshotQuantity       int
+	writeMu                sync.Mutex
 }
 
 func NewBybitAdapter(config *config.ExchangeConfig) *BybitAdapter {
 	return &BybitAdapter{
-		name:               config.Name,
-		symbolDiscoveryUrl: config.SymbolDiscoveryUrl,
-		snapshotUrl:        config.SnapshotUrl,
-		streamUrl:          config.StreamUrl,
-		btreeDegree:        config.BTreeDegree,
-		snapshotQuantity:   config.SnapshotQuantity,
-
-		lastUpdateID: make(map[string]int64),
-		isSynced:     make(map[string]bool),
-		deltaQueues:  make(map[string][]event.EventEnvelope),
-
-		resyncChan: make(chan string, 100),
+		name:                   config.Name,
+		symbolDiscoveryUrl:     config.SymbolDiscoveryUrl,
+		snapshotUrl:            config.SnapshotUrl,
+		streamUrl:              config.StreamUrl,
+		streamBufferSize:       config.StreamBufferSize,
+		symbolWorkerBufferSize: config.StreamBufferSize,
+		deltaQueueSize:         config.DeltaQueueSize,
+		btreeDegree:            config.BTreeDegree,
+		snapshotQuantity:       config.SnapshotQuantity,
 	}
 }
 
-// Start discovers symbols, subscribes to orderbook updates, manages per-symbol state,
-// validates sequences, and handles snapshot/delta flow specific to Bybit protocol.
-// Includes re-subscribe mechanism on gap detection.
+// Start discovers symbols, creates per-symbol workers, subscribes to WebSocket feed,
+// dispatches events to workers, and handles re-subscribe requests from workers.
 func (b *BybitAdapter) Start(ctx context.Context, publishChan chan<- *domain.OrderBookSnapshot) error {
 	log.Printf("Starting BybitAdapter for exchange: %s", b.name)
 
@@ -66,31 +57,27 @@ func (b *BybitAdapter) Start(ctx context.Context, publishChan chan<- *domain.Ord
 	}
 	log.Printf("Discovered %d symbols on %s", len(symbols), b.name)
 
-	// Initialize per-symbol state
-	b.mu.Lock()
-	statePerSymbol := make(map[string]*service.OrderBookState)
-	for _, symbol := range symbols {
-		b.lastUpdateID[symbol] = 0
-		b.isSynced[symbol] = false
-		b.deltaQueues[symbol] = make([]event.EventEnvelope, 0, 100)
+	// resyncChan: workers signal dispatcher which symbol needs re-subscription
+	resyncChan := make(chan string, len(symbols))
 
+	// Create one worker + one channel per symbol to maintain their own order book state
+	workerChans := make(map[string]chan event.EventEnvelope, len(symbols))
+	for _, symbol := range symbols {
 		state, err := service.NewOrderBookState(b.btreeDegree, b.snapshotQuantity)
 		if err != nil {
-			b.mu.Unlock()
 			log.Printf("Failed to create OrderBookState for symbol %s: %v", symbol, err)
 			return err
 		}
-		statePerSymbol[symbol] = state
-	}
-	b.mu.Unlock()
 
-	// Start emitters for each symbol
-	for _, symbol := range symbols {
-		go func(sym string) {
-			state := statePerSymbol[sym]
-			state.RunEmitter(ctx, b.name, sym, publishChan)
-		}(symbol)
+		ch := make(chan event.EventEnvelope, b.symbolWorkerBufferSize)
+		workerChans[symbol] = ch
+
+		worker := newBybitSymbolWorker(b.name, symbol, b.deltaQueueSize, state, ch, resyncChan)
+		go worker.run(ctx, publishChan)
 	}
+
+	// Subscribe to WebSocket feed and process updates
+	mainChan := make(chan event.EventEnvelope, b.streamBufferSize)
 
 	// Chunk symbols into groups (Bybit allows max ~10 topics per connection)
 	chunkSize := 10
@@ -101,16 +88,29 @@ func (b *BybitAdapter) Start(ctx context.Context, publishChan chan<- *domain.Ord
 		}
 
 		chunk := symbols[i:end]
-		go b.connectAndListen(ctx, chunk, statePerSymbol)
+
+		// Wait 20ms increments between goroutines
+		go func(idx int) {
+			jitter := time.Duration(idx) * 20 * time.Millisecond
+			select {
+			case <-time.After(jitter):
+			case <-ctx.Done():
+				return
+			}
+			b.connectAndListen(ctx, chunk, mainChan, resyncChan)
+		}(i / chunkSize)
 	}
+
+	// Dispatch incoming events to workers
+	go b.dispatch(ctx, mainChan, workerChans)
 
 	// Wait for context cancellation
 	<-ctx.Done()
 	log.Printf("BybitAdapter shutting down gracefully...")
+	close(mainChan)
 	return nil
 }
 
-// discoverSymbols fetches active USDT trading pairs from Bybit.
 func (b *BybitAdapter) discoverSymbols(ctx context.Context) ([]string, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", b.symbolDiscoveryUrl, nil)
 	if err != nil {
@@ -145,9 +145,36 @@ func (b *BybitAdapter) discoverSymbols(ctx context.Context) ([]string, error) {
 	return symbols, nil
 }
 
+// dispatch routes WS events to the correct worker.
+func (b *BybitAdapter) dispatch(
+	ctx context.Context,
+	mainChan <-chan event.EventEnvelope,
+	workerChans map[string]chan event.EventEnvelope,
+) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case envelope, ok := <-mainChan:
+			if !ok {
+				return
+			}
+			sym := envelope.Payload.Symbol
+			if ch, exists := workerChans[sym]; exists {
+				select {
+				case ch <- envelope:
+				default:
+					observation.RecordEvent(ctx, b.name, "dropped_queue_full")
+					log.Printf("Warning: Dropping order book event for %s due to full channel buffer", sym)
+				}
+			}
+		}
+	}
+}
+
 // connectAndListen connects to Bybit WebSocket and handles subscription with re-subscribe on gap.
 // Runs re-subscribe and message listening in parallel goroutines on same connection.
-func (b *BybitAdapter) connectAndListen(ctx context.Context, symbols []string, statePerSymbol map[string]*service.OrderBookState) {
+func (b *BybitAdapter) connectAndListen(ctx context.Context, symbols []string, mainChan chan<- event.EventEnvelope, resyncChan <-chan string) {
 	topicMap := make(map[string]string)
 	for _, symbol := range symbols {
 		topicMap[symbol] = fmt.Sprintf("orderbook.50.%s", symbol)
@@ -183,14 +210,12 @@ func (b *BybitAdapter) connectAndListen(ctx context.Context, symbols []string, s
 		}
 
 		// Goroutine handles re-subscribe requests from resyncChan
-		stopResync := make(chan struct{})
 		go func() {
-			defer close(stopResync)
 			for {
 				select {
 				case <-ctx.Done():
 					return
-				case symbol, ok := <-b.resyncChan:
+				case symbol, ok := <-resyncChan:
 					if !ok {
 						return
 					}
@@ -204,7 +229,7 @@ func (b *BybitAdapter) connectAndListen(ctx context.Context, symbols []string, s
 					// Unsubscribe
 					b.writeMu.Lock()
 					unsubMsg := BybitWsCommandMessage{
-						Op:   "subscribe",
+						Op:   "unsubscribe",
 						Args: []string{topic},
 					}
 					err := conn.WriteJSON(unsubMsg)
@@ -224,7 +249,7 @@ func (b *BybitAdapter) connectAndListen(ctx context.Context, symbols []string, s
 			}
 		}()
 
-		b.listenAndProcess(ctx, conn, statePerSymbol)
+		b.listenAndProcess(ctx, conn, mainChan)
 		conn.Close()
 
 		// Wait before reconnecting
@@ -250,8 +275,8 @@ func (b *BybitAdapter) sendSubscribe(conn *websocket.Conn, topics []string) erro
 	return conn.WriteJSON(msg)
 }
 
-// listenAndProcess reads WebSocket messages and dispatches to handlers.
-func (b *BybitAdapter) listenAndProcess(ctx context.Context, conn *websocket.Conn, statePerSymbol map[string]*service.OrderBookState) {
+// listenAndProcess reads WebSocket messages and sends them to mainChan as envelopes.
+func (b *BybitAdapter) listenAndProcess(ctx context.Context, conn *websocket.Conn, mainChan chan<- event.EventEnvelope) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -261,11 +286,6 @@ func (b *BybitAdapter) listenAndProcess(ctx context.Context, conn *websocket.Con
 			if err := conn.ReadJSON(&msg); err != nil {
 				log.Printf("WebSocket read error: %v", err)
 				return
-			}
-
-			state, exists := statePerSymbol[msg.Data.S]
-			if !exists {
-				continue
 			}
 
 			payload := domain.OrderBookEvent{
@@ -284,94 +304,13 @@ func (b *BybitAdapter) listenAndProcess(ctx context.Context, conn *websocket.Con
 				Payload:    payload,
 			}
 
-			switch msg.Type {
-			case "snapshot":
-				b.handleSnapshot(ctx, envelope, state)
-			case "delta":
-				b.handleDelta(ctx, envelope, state)
+			select {
+			case mainChan <- envelope:
+			case <-ctx.Done():
+				return
 			}
 		}
 	}
-}
-
-// handleSnapshot processes a snapshot message from Bybit.
-func (b *BybitAdapter) handleSnapshot(ctx context.Context, envelope event.EventEnvelope, state *service.OrderBookState) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	delta := envelope.Payload
-	symbol := delta.Symbol
-
-	state.ApplySnapshot(delta)
-
-	b.lastUpdateID[symbol] = delta.UpdateID
-	b.isSynced[symbol] = true
-
-	if queued, exists := b.deltaQueues[symbol]; exists && len(queued) > 0 {
-		for _, queuedEnvelope := range queued {
-			queuedDelta := queuedEnvelope.Payload
-			if queuedDelta.UpdateID > delta.UpdateID {
-				state.ApplyUpdate(queuedDelta)
-				b.lastUpdateID[symbol] = queuedDelta.UpdateID
-			}
-		}
-		b.deltaQueues[symbol] = b.deltaQueues[symbol][:0]
-	}
-
-	observation.SymbolSynced(ctx, b.name)
-	log.Printf("Snapshot applied for %s (UpdateID: %d)", symbol, delta.UpdateID)
-}
-
-// handleDelta processes delta messages with gap detection and re-subscribe signaling.
-func (b *BybitAdapter) handleDelta(ctx context.Context, envelope event.EventEnvelope, state *service.OrderBookState) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	delta := envelope.Payload
-	symbol := delta.Symbol
-	isSynced := b.isSynced[symbol]
-	lastUpdateID := b.lastUpdateID[symbol]
-
-	if !isSynced {
-		// Not synced: queue delta until snapshot received
-		b.deltaQueues[symbol] = append(b.deltaQueues[symbol], envelope)
-		observation.RecordEvent(ctx, b.name, "queued")
-		return
-	}
-
-	// Service restart signal
-	if delta.UpdateID == 1 {
-		log.Printf("Service restart signal received for %s (u=1)", symbol)
-		b.isSynced[symbol] = false
-		b.deltaQueues[symbol] = b.deltaQueues[symbol][:0]
-		observation.RecordEvent(ctx, b.name, "dropped_service_restart")
-
-		select {
-		case b.resyncChan <- symbol:
-		default:
-		}
-		return
-	}
-
-	// Check for sequence gap
-	if delta.PrevUpdateID > lastUpdateID+1 {
-		log.Printf("Sequence gap detected for %s: expected %d, got %d", symbol, lastUpdateID+1, delta.PrevUpdateID)
-		b.isSynced[symbol] = false
-		b.deltaQueues[symbol] = b.deltaQueues[symbol][:0]
-		observation.RecordEvent(ctx, b.name, "dropped_gap")
-		observation.SymbolGapped(ctx, b.name)
-
-		select {
-		case b.resyncChan <- symbol:
-		default:
-		}
-		return
-	}
-
-	state.ApplyUpdate(delta)
-	b.lastUpdateID[symbol] = delta.UpdateID
-	observation.RecordEvent(ctx, b.name, "applied")
-	observation.SampleLatency(ctx, b.name, time.Since(envelope.ReceivedAt))
 }
 
 // convertToOrderLevels converts string price/size pairs to OrderLevel structs.

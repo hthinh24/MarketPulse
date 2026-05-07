@@ -8,6 +8,7 @@ import (
 	"MarketPulse/internal/orderbook/service"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/gorilla/websocket"
 	"io"
@@ -16,39 +17,33 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
 type BinanceAdapter struct {
-	name                string
-	symbolDiscoveryUrl  string
-	snapshotUrl         string
-	streamUrl           string
-	streamBufferSize    int
-	deltaQueueSize      int
-	retryMaxAttempts    int
-	retryInitialDelayMs int
-	retryMaxDelayMs     int
-	btreeDegree         int
-	snapshotQuantity    int
-
-	// Per-symbol state tracking
-	mu             sync.RWMutex
-	lastUpdateID   map[string]int64
-	isSynced       map[string]bool
-	deltaQueues    map[string][]event.EventEnvelope
-	statePerSymbol map[string]*service.OrderBookState
+	name                   string
+	symbolDiscoveryUrl     string
+	snapshotUrl            string
+	streamUrl              string
+	streamBufferSize       int
+	symbolWorkerBufferSize int
+	deltaQueueSize         int
+	retryMaxAttempts       int
+	retryInitialDelayMs    int
+	retryMaxDelayMs        int
+	btreeDegree            int
+	snapshotQuantity       int
 }
 
 func NewBinanceAdapter(config *config.ExchangeConfig) *BinanceAdapter {
 	return &BinanceAdapter{
-		name:               config.Name,
-		symbolDiscoveryUrl: config.SymbolDiscoveryUrl,
-		snapshotUrl:        config.SnapshotUrl,
-		streamUrl:          config.StreamUrl,
-		streamBufferSize:   config.StreamBufferSize,
-		deltaQueueSize:     config.DeltaQueueSize,
+		name:                   config.Name,
+		symbolDiscoveryUrl:     config.SymbolDiscoveryUrl,
+		snapshotUrl:            config.SnapshotUrl,
+		streamUrl:              config.StreamUrl,
+		streamBufferSize:       config.StreamBufferSize,
+		symbolWorkerBufferSize: config.StreamBufferSize,
+		deltaQueueSize:         config.DeltaQueueSize,
 
 		retryMaxAttempts:    config.RetryMaxAttempts,
 		retryInitialDelayMs: config.RetryInitialDelayMs,
@@ -56,16 +51,11 @@ func NewBinanceAdapter(config *config.ExchangeConfig) *BinanceAdapter {
 
 		btreeDegree:      config.BTreeDegree,
 		snapshotQuantity: config.SnapshotQuantity,
-
-		lastUpdateID:   make(map[string]int64),
-		isSynced:       make(map[string]bool),
-		deltaQueues:    make(map[string][]event.EventEnvelope),
-		statePerSymbol: make(map[string]*service.OrderBookState),
 	}
 }
 
-// Start discovers symbols, subscribes to orderbook updates, manages per-symbol state,
-// validates sequences, handles resync with exponential backoff, and emits snapshots.
+// Start discovers symbols, creates per-symbol workers, subscribes to WebSocket feed,
+// dispatches events to workers, and handles resync requests from workers.
 func (b *BinanceAdapter) Start(ctx context.Context, publishChan chan<- *domain.OrderBookSnapshot) error {
 	log.Printf("Starting BinanceAdapter for exchange: %s", b.name)
 
@@ -77,48 +67,82 @@ func (b *BinanceAdapter) Start(ctx context.Context, publishChan chan<- *domain.O
 	}
 	log.Printf("Discovered %d symbols on %s", len(symbols), b.name)
 
-	// Initialize per-symbol state
-	b.mu.Lock()
-	for _, symbol := range symbols {
-		b.lastUpdateID[symbol] = 0
-		b.isSynced[symbol] = false
-		b.deltaQueues[symbol] = make([]event.EventEnvelope, 0, b.deltaQueueSize)
+	// resyncChan: workers signal dispatcher which symbol needs a fresh snapshot
+	resyncChan := make(chan string, len(symbols))
 
+	// Create one worker + one channel per symbol to maintain their own order book state
+	workerChans := make(map[string]chan event.EventEnvelope, len(symbols))
+	for _, symbol := range symbols {
 		state, err := service.NewOrderBookState(b.btreeDegree, b.snapshotQuantity)
 		if err != nil {
-			b.mu.Unlock()
 			log.Printf("Failed to create OrderBookState for symbol %s: %v", symbol, err)
 			return err
 		}
-		b.statePerSymbol[symbol] = state
-	}
-	b.mu.Unlock()
 
-	// Start emitters for each symbol
-	for _, symbol := range symbols {
-		go func(sym string) {
-			state := b.statePerSymbol[sym]
-			state.RunEmitter(ctx, b.name, sym, publishChan)
-		}(symbol)
+		ch := make(chan event.EventEnvelope, b.symbolWorkerBufferSize)
+		workerChans[symbol] = ch
+
+		worker := newBinanceSymbolWorker(b.name, symbol, b.deltaQueueSize, state, ch, resyncChan)
+		go worker.run(ctx, publishChan)
 	}
 
-	// Initial resync for all symbols
-	for _, symbol := range symbols {
-		go b.resyncWithBackoff(ctx, symbol)
+	// Initial resync — staggered to avoid HTTP burst toward Binance
+	for i, symbol := range symbols {
+		go func(sym string, idx int) {
+			jitter := time.Duration(idx) * 20 * time.Millisecond
+			select {
+			case <-time.After(jitter):
+			case <-ctx.Done():
+				return
+			}
+			b.resyncWithBackoff(ctx, sym, workerChans[sym])
+		}(symbol, i)
 	}
 
 	// Subscribe to WebSocket feed and process updates
 	mainChan := make(chan event.EventEnvelope, b.streamBufferSize)
 	go b.subscribeOrderBooks(ctx, symbols, mainChan)
 
-	// Process incoming updates
-	go b.processUpdates(ctx, mainChan)
+	// Dispatch incoming events to workers, handle resync requests from workers
+	go b.dispatch(ctx, mainChan, workerChans, resyncChan)
 
 	// Wait for context cancellation
 	<-ctx.Done()
 	log.Printf("BinanceAdapter shutting down gracefully...")
 	close(mainChan)
 	return nil
+}
+
+// dispatch routes WS events to the correct worker and handles resync requests.
+func (b *BinanceAdapter) dispatch(
+	ctx context.Context,
+	mainChan <-chan event.EventEnvelope,
+	workerChans map[string]chan event.EventEnvelope,
+	resyncChan <-chan string,
+) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case envelope, ok := <-mainChan:
+			if !ok {
+				return
+			}
+			sym := envelope.Payload.Symbol
+			if ch, exists := workerChans[sym]; exists {
+				select {
+				case ch <- envelope:
+				default:
+					observation.RecordEvent(ctx, b.name, "dropped_queue_full")
+					log.Printf("Warning: Dropping order book event for %s due to full channel buffer", sym)
+				}
+			}
+		case symbol := <-resyncChan:
+			if ch, exists := workerChans[symbol]; exists {
+				go b.resyncWithBackoff(ctx, symbol, ch)
+			}
+		}
+	}
 }
 
 // discoverSymbols fetches active USDT trading pairs from Binance.
@@ -152,42 +176,6 @@ func (b *BinanceAdapter) discoverSymbols(ctx context.Context) ([]string, error) 
 		}
 	}
 	return symbols, nil
-}
-
-func (b *BinanceAdapter) fetchSnapshot(ctx context.Context, symbol string) (*domain.OrderBookEvent, error) {
-	url := fmt.Sprintf("%s?symbol=%s&limit=1000", b.snapshotUrl, strings.ToUpper(symbol))
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to fetch snapshot for %s: status %d", symbol, resp.StatusCode)
-	}
-
-	var snapshot BinanceSnapshotResponse
-	if err := json.NewDecoder(resp.Body).Decode(&snapshot); err != nil {
-		return nil, err
-	}
-
-	orderBookEvent := &domain.OrderBookEvent{
-		Exchange:     b.name,
-		Symbol:       symbol,
-		IsSnapshot:   true,
-		UpdateID:     snapshot.LastUpdateId,
-		PrevUpdateID: 0,
-		Timestamp:    time.Now().UnixMilli(),
-		Bids:         b.convertToOrderLevels(snapshot.Bids),
-		Asks:         b.convertToOrderLevels(snapshot.Asks),
-	}
-
-	return orderBookEvent, nil
 }
 
 // subscribeOrderBooks connects to Binance WebSocket and streams updates.
@@ -275,74 +263,9 @@ func (b *BinanceAdapter) listenAndProcess(ctx context.Context, conn *websocket.C
 	}
 }
 
-// processUpdates handles incoming orderbook events: sequences validation, queueing, syncing.
-func (b *BinanceAdapter) processUpdates(ctx context.Context, deltaChan <-chan event.EventEnvelope) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case delta, ok := <-deltaChan:
-			if !ok {
-				return
-			}
-
-			b.handleUpdate(ctx, delta)
-		}
-	}
-}
-
-// handleUpdate applies sequence validation and state management per symbol.
-func (b *BinanceAdapter) handleUpdate(ctx context.Context, orderbookEvent event.EventEnvelope) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	delta := orderbookEvent.Payload
-
-	symbol := delta.Symbol
-	state := b.statePerSymbol[symbol]
-	if state == nil {
-		return
-	}
-
-	isSynced := b.isSynced[symbol]
-	lastUpdateID := b.lastUpdateID[symbol]
-
-	if !isSynced {
-		// Not synced: queue deltas until snapshot received
-		if len(b.deltaQueues[symbol]) >= b.deltaQueueSize {
-			log.Printf("Delta queue overflow for %s, triggering resync...", symbol)
-			b.deltaQueues[symbol] = b.deltaQueues[symbol][:0]
-			b.isSynced[symbol] = false
-
-			go b.resyncWithBackoff(ctx, symbol)
-			return
-		}
-
-		b.deltaQueues[symbol] = append(b.deltaQueues[symbol], orderbookEvent)
-		observation.RecordEvent(ctx, b.name, "queued")
-		return
-	}
-
-	// Check for sequence gap
-	if delta.PrevUpdateID > lastUpdateID+1 {
-		log.Printf("Sequence gap detected for %s: expected %d, got %d", symbol, lastUpdateID+1, delta.PrevUpdateID)
-		b.isSynced[symbol] = false
-		b.deltaQueues[symbol] = b.deltaQueues[symbol][:0]
-		observation.RecordEvent(ctx, b.name, "dropped_gap")
-		observation.SymbolGapped(ctx, b.name)
-
-		go b.resyncWithBackoff(ctx, symbol)
-		return
-	}
-
-	// Update is valid, apply it
-	state.ApplyUpdate(delta)
-	b.lastUpdateID[symbol] = delta.UpdateID
-	observation.RecordEvent(ctx, b.name, "applied")
-	observation.SampleLatency(ctx, b.name, time.Since(orderbookEvent.ReceivedAt))
-}
-
-func (b *BinanceAdapter) resyncWithBackoff(ctx context.Context, symbol string) {
+// resyncWithBackoff fetches a snapshot and pushes it into the worker channel.
+// Handles Binance rate limit (429/418) base on Retry-After header.
+func (b *BinanceAdapter) resyncWithBackoff(ctx context.Context, symbol string, workerChan chan<- event.EventEnvelope) {
 	delay := time.Duration(b.retryInitialDelayMs) * time.Millisecond
 	maxDelay := time.Duration(b.retryMaxDelayMs) * time.Millisecond
 
@@ -354,40 +277,86 @@ func (b *BinanceAdapter) resyncWithBackoff(ctx context.Context, symbol string) {
 		}
 
 		snapshot, err := b.fetchSnapshot(ctx, symbol)
-		if err != nil {
+
+		var rateLimitErr *RateLimitError
+		if errors.As(err, &rateLimitErr) {
+			log.Printf("Exchange: %s Rate limit hit while fetching snapshot for %s: retrying after %v", b.name, symbol, rateLimitErr.RetryAfter)
+			select {
+			case <-time.After(rateLimitErr.RetryAfter):
+			case <-ctx.Done():
+				return
+			}
+			attempt = 0
+			continue
+		} else if err != nil {
 			log.Printf("Resync attempt %d for %s failed: %v, retrying...", attempt+1, symbol, err)
 			// Exponential backoff: delay *= 2, capped at maxDelay
 			delay = time.Duration(math.Min(float64(delay.Milliseconds())*2, float64(maxDelay.Milliseconds()))) * time.Millisecond
 			continue
 		}
 
-		// Success: apply snapshot and process queued deltas
-		b.mu.Lock()
-		state := b.statePerSymbol[symbol]
-		if state != nil {
-			state.ApplySnapshot(*snapshot)
-			b.lastUpdateID[symbol] = snapshot.UpdateID
-			b.isSynced[symbol] = true
-
-			observation.SymbolSynced(ctx, b.name)
-
-			// Apply queued deltas that are newer than snapshot
-			for _, orderbookEvent := range b.deltaQueues[symbol] {
-				delta := orderbookEvent.Payload
-				if delta.UpdateID > snapshot.UpdateID {
-					state.ApplyUpdate(delta)
-					b.lastUpdateID[symbol] = delta.UpdateID
-				}
-			}
-			b.deltaQueues[symbol] = b.deltaQueues[symbol][:0]
-
-			log.Printf("Resync succeeded for %s after %d attempt(s)", symbol, attempt+1)
+		envelope := event.EventEnvelope{
+			ReceivedAt: time.Now(),
+			Payload:    *snapshot,
 		}
-		b.mu.Unlock()
+		select {
+		case workerChan <- envelope:
+			log.Printf("Resync succeeded for %s after %d attempt(s)", symbol, attempt+1)
+		case <-ctx.Done():
+			return
+		}
 		return
 	}
 
 	log.Printf("Resync failed for %s after %d attempts, will retry on next gap detection or initial resync", symbol, b.retryMaxAttempts)
+}
+
+func (b *BinanceAdapter) fetchSnapshot(ctx context.Context, symbol string) (*domain.OrderBookEvent, error) {
+	url := fmt.Sprintf("%s?symbol=%s&limit=100", b.snapshotUrl, strings.ToUpper(symbol))
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusTooManyRequests ||
+		resp.StatusCode == 418 {
+		retryAfter := resp.Header.Get("Retry-After")
+		wait := 60 * time.Second // default fallback
+		if retryAfter != "" {
+			if secs, err := strconv.Atoi(retryAfter); err == nil {
+				wait = time.Duration(secs) * time.Second
+			}
+		}
+		return nil, &RateLimitError{RetryAfter: wait}
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to fetch snapshot for %s: status %d", symbol, resp.StatusCode)
+	}
+
+	var snapshot BinanceSnapshotResponse
+	if err := json.NewDecoder(resp.Body).Decode(&snapshot); err != nil {
+		return nil, err
+	}
+
+	orderBookEvent := &domain.OrderBookEvent{
+		Exchange:     b.name,
+		Symbol:       symbol,
+		IsSnapshot:   true,
+		UpdateID:     snapshot.LastUpdateId,
+		PrevUpdateID: 0,
+		Timestamp:    time.Now().UnixMilli(),
+		Bids:         b.convertToOrderLevels(snapshot.Bids),
+		Asks:         b.convertToOrderLevels(snapshot.Asks),
+	}
+
+	return orderBookEvent, nil
 }
 
 func (b *BinanceAdapter) parseBinanceWSMessage(message []byte) *domain.OrderBookEvent {

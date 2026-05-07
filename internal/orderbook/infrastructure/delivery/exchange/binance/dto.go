@@ -17,7 +17,7 @@ type BinanceSnapshotResponse struct {
 	Asks         [][]string `json:"asks"`
 }
 
-// Response trả về từ WebSocket
+// WebSocket Response
 type BinanceDepthUpdate struct {
 	EventType     string     `json:"e"`
 	EventTime     int64      `json:"E"`
