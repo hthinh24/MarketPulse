@@ -755,7 +755,8 @@
                 "value": 80
               }
             ]
-          }
+          },
+          "unit": "s"
         },
         "overrides": []
       },
@@ -765,7 +766,7 @@
         "x": 12,
         "y": 24
       },
-      "id": 4,
+      "id": 9,
       "options": {
         "legend": {
           "calcs": [],
@@ -782,18 +783,38 @@
       "pluginVersion": "12.4.2",
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
           "editorMode": "code",
-          "expr": "sum(rate(marketpulse_process_cpu_seconds_total{exported_instance=~\"^$instance$\"}[2m]))",
-          "legendFormat": "CPU Core Usage",
+          "expr": "histogram_quantile(0.50,\r\n  rate(marketpulse_go_schedule_duration_seconds_bucket{exported_instance=\"$instance\"}[1m])\r\n)",
+          "legendFormat": "p50",
           "range": true,
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "marketpulse-prometheus-uid"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95,\r\n  rate(marketpulse_go_schedule_duration_seconds_bucket{exported_instance=\"$instance\"}[1m])\r\n)",
+          "instant": false,
+          "legendFormat": "p95",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "marketpulse-prometheus-uid"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99,\r\n  rate(marketpulse_go_schedule_duration_seconds_bucket{exported_instance=\"$instance\"}[1m])\r\n)",
+          "instant": false,
+          "legendFormat": "p99",
+          "range": true,
+          "refId": "C"
         }
       ],
-      "title": "CPU Utilization",
+      "title": " Scheduler Latency (goroutine wait time)",
       "type": "timeseries"
     }
   ],
@@ -839,6 +860,6 @@
   "timezone": "browser",
   "title": "MarketPulse-Orderbook",
   "uid": "sdsadsa",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }

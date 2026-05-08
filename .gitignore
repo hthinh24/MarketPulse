@@ -4,9 +4,8 @@
 # Env #
 .env
 
+bin
+
 docs
 
-README.md
-
 k6
-Makefile
