@@ -2,6 +2,7 @@ package main
 
 import (
 	ingestor2 "MarketPulse/internal/ingestor"
+	"MarketPulse/internal/ingestor/config"
 	"MarketPulse/internal/ingestor/config/kafka"
 	binance2 "MarketPulse/internal/ingestor/exchange/binance"
 	bybit2 "MarketPulse/internal/ingestor/exchange/bybit"
@@ -10,6 +11,7 @@ import (
 	"MarketPulse/internal/ingestor/producer/event"
 	"context"
 	"fmt"
+	"github.com/joho/godotenv"
 	"log"
 	"os/signal"
 	"strings"
@@ -20,7 +22,13 @@ import (
 )
 
 func main() {
-	// TODO(refactor): Move config values to config file or via configuration struct
+	_ = godotenv.Load()
+
+	cfg, err := config.LoadAppConfig()
+	if err != nil {
+		log.Fatalf("Failed to load config: %v", err)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -32,15 +40,13 @@ func main() {
 		StartTicker(ctx, ticker, &counter)
 	}()
 
-	kafkaTopicPrefix := "market_trades"
-
 	writerWg := sync.WaitGroup{}
 	pollerWg := sync.WaitGroup{}
 
 	// ------------------- Binance Exchange Ingestor -------------------
 	binanceExchange := "Binance"
-	binanceKafkaTopic := kafkaTopicPrefix + "_" + strings.ToLower(binanceExchange)
-	kafkaWriter := kafka.NewKafkaWriter("localhost:9092", binanceKafkaTopic)
+	binanceKafkaTopic := cfg.Kafka.TopicPrefix + "_" + strings.ToLower(binanceExchange)
+	kafkaWriter := kafka.NewKafkaWriter(cfg.Kafka.Broker, binanceKafkaTopic)
 	defer kafkaWriter.Close()
 
 	binanceProducerManager := producer.NewTickDataProducerManager(8)
@@ -59,7 +65,7 @@ func main() {
 	for i, chunk := range chunks {
 
 		streamPath := strings.Join(chunk, "/")
-		url := fmt.Sprintf("wss://stream.binance.com:9443/stream?streams=%s", streamPath)
+		url := fmt.Sprintf("%s?streams=%s", cfg.Binance.StreamURL, streamPath)
 
 		binanceExchange := binance2.NewBinanceAdapter(url)
 		exchangeIngestor := ingestor2.NewExchangeIngestor(
@@ -74,8 +80,8 @@ func main() {
 
 	// ------------------- OKX Exchange Ingestor -------------------
 	okxExchange := "OKX"
-	okxKafkaTopic := kafkaTopicPrefix + "_" + strings.ToLower(okxExchange)
-	okxKafkaWriter := kafka.NewKafkaWriter("localhost:9092", okxKafkaTopic)
+	okxKafkaTopic := cfg.Kafka.TopicPrefix + "_" + strings.ToLower(okxExchange)
+	okxKafkaWriter := kafka.NewKafkaWriter(cfg.Kafka.Broker, okxKafkaTopic)
 	defer okxKafkaWriter.Close()
 
 	okxProducerManager := producer.NewTickDataProducerManager(8)
@@ -94,7 +100,7 @@ func main() {
 	for i, chunk := range okxChunks {
 		var okxAdapter *okx2.OKXAdapter
 		okxAdapter = okx2.NewOKXAdapter(
-			"wss://ws.okx.com:8443/ws/v5/public",
+			cfg.OKX.StreamURL,
 			chunk,
 		)
 
@@ -110,8 +116,8 @@ func main() {
 
 	// ------------------- Bybit Exchange Ingestor -------------------
 	bybitExchange := "bybit"
-	bybitKafkaTopic := kafkaTopicPrefix + "_" + strings.ToLower(bybitExchange)
-	bybitKafkaWriter := kafka.NewKafkaWriter("localhost:9092", bybitKafkaTopic)
+	bybitKafkaTopic := cfg.Kafka.TopicPrefix + "_" + strings.ToLower(bybitExchange)
+	bybitKafkaWriter := kafka.NewKafkaWriter(cfg.Kafka.Broker, bybitKafkaTopic)
 	defer bybitKafkaWriter.Close()
 
 	bybitProducerManager := producer.NewTickDataProducerManager(8)
@@ -130,7 +136,7 @@ func main() {
 	for i, chunk := range bybitChunks {
 		var bybitAdapter *bybit2.BybitAdapter
 		bybitAdapter = bybit2.NewBybitAdapter(
-			"wss://stream.bytick.com/v5/public/spot",
+			cfg.Bybit.StreamURL,
 			chunk,
 		)
 

@@ -6,9 +6,9 @@ services:
     volumes:
       - ./infrastructure/otel/otel-collector-config.yml:/etc/otel-collector-config.yml
     ports:
-      - "4317:4317" # gRPC port
-      - "4318:4318" # HTTP port
-      - "8889:8889"
+      - "${OTEL_COLLECTOR_GRPC_PORT:-4317}:4317" # gRPC port
+      - "${OTEL_COLLECTOR_HTTP_PORT:-4318}:4318" # HTTP port
+      - "${OTEL_COLLECTOR_METRICS_PORT:-8889}:8889"
     networks:
       - market_pulse-network
 
@@ -18,10 +18,10 @@ services:
     depends_on:
       - otel-collector
     ports:
-      - "9090:9090"
+      - "${PROMETHEUS_PORT:-9090}:9090"
     volumes:
       - ./infrastructure/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
-      - D:/workspace/Projects/MarketPulse/prometheus-data:/prometheus
+      - prometheus-data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
@@ -40,11 +40,11 @@ services:
     depends_on:
       - prometheus
     ports:
-      - "3000:3000"
+      - "${GRAFANA_PORT:-3000}:3000"
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
     volumes:
-      - D:/workspace/Projects/MarketPulse/grafana-data:/var/lib/grafana
+      - grafana-data:/var/lib/grafana
       - ./infrastructure/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards
       - ./infrastructure/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources
     networks:
@@ -53,3 +53,7 @@ services:
 networks:
   market_pulse-network:
     external: true
+
+volumes:
+  prometheus-data:
+  grafana-data:

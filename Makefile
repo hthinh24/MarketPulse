@@ -37,11 +37,12 @@ run:
 	@echo "Starting all MarketPulse services..."
 	@echo "Make sure Docker services are running: make up"
 	@echo ""
-	start "ingestor"   cmd /k go run cmd/ingestor/main.go
-	start "aggregator" cmd /k go run cmd/aggregator/main.go
-	start "broadcaster" cmd /k go run cmd/broadcaster/main.go
-	start "orderbook"  cmd /k go run cmd/orderbook/main.go
-	start "server"     cmd /k go run cmd/server/main.go
+	powershell -Command "Start-Process powershell -ArgumentList '-NoExit -Command cd $(CURDIR); go run cmd/ingestor/main.go'"
+	powershell -Command "Start-Process powershell -ArgumentList '-NoExit -Command cd $(CURDIR); go run cmd/aggregator/main.go'"
+	powershell -Command "Start-Process powershell -ArgumentList '-NoExit -Command cd $(CURDIR); go run cmd/broadcaster/main.go'"
+	powershell -Command "Start-Process powershell -ArgumentList '-NoExit -Command cd $(CURDIR); go run cmd/orderbook/main.go'"
+	powershell -Command "Start-Process powershell -ArgumentList '-NoExit -Command cd $(CURDIR); go run cmd/server/main.go'"
+	@echo "All services started in separate PowerShell windows!"
 
 # ============== Docker Commands ==============
 # Start all core services (Kafka, Redis, TimescaleDB, etc.)
