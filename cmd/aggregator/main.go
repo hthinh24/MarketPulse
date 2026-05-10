@@ -1,21 +1,20 @@
 package main
 
 import (
+	aggregatorConfig "MarketPulse/internal/aggregator/config"
 	"MarketPulse/internal/aggregator/domain"
 	worker "MarketPulse/internal/aggregator/infrastructure"
 	postgres2 "MarketPulse/internal/aggregator/infrastructure/repository/postgres"
 	redis2 "MarketPulse/internal/aggregator/infrastructure/repository/redis"
 
-	//worker "MarketPulse/internal/aggregator/infrastructure"
 	"MarketPulse/internal/aggregator/infrastructure/dbsync"
 	adapter2 "MarketPulse/internal/aggregator/infrastructure/dbsync/adapter"
 	"MarketPulse/internal/aggregator/infrastructure/delivery"
 	aggregator "MarketPulse/internal/aggregator/infrastructure/publisher"
-	//postgres2 "MarketPulse/internal/aggregator/infrastructure/repository/postgres"
-	//redis2 "MarketPulse/internal/aggregator/infrastructure/repository/redis"
 	"MarketPulse/internal/telemetry"
 	"context"
 	"github.com/go-redis/redis/v8"
+	"github.com/joho/godotenv"
 	"github.com/segmentio/kafka-go"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -35,17 +34,23 @@ func main() {
 		log.Println(http.ListenAndServe("localhost:6061", nil))
 	}()
 
+	_ = godotenv.Load()
+
+	cfg, err := aggregatorConfig.LoadAppConfig()
+	if err != nil {
+		log.Fatalf("Failed to load config: %v", err)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	serviceName := "marketpulse-aggregator"
-	otlpEndpoint := "localhost:4317"
 
-	shutdown := telemetry.InitProvider(serviceName, otlpEndpoint)
+	shutdown := telemetry.InitProvider(serviceName, cfg.OTLP.Endpoint)
 	defer shutdown(ctx)
 
-	db := InitDB()
-	rdb := initRedisDB()
+	db := initDB(cfg.DB)
+	rdb := initRedisDB(cfg.Redis)
 
 	defer func() {
 		if err := rdb.Close(); err != nil {
@@ -65,14 +70,13 @@ func main() {
 	dbIngestor := worker.NewDBIngestor(saveChan, candleCache, candleRepository, batchSize)
 
 	consumerGroup := "aggregator-group"
-	kafkaTopicPrefix := "market_trades"
 	binanceExchange := "BINANCE"
 	okxExchange := "OKX"
 	bybitExchange := "BYBIT"
 
-	binanceReader := kafka.NewReader(*InitKafkaReaderConfig("localhost:9092", kafkaTopicPrefix+"_"+strings.ToLower(binanceExchange), consumerGroup))
-	okxReader := kafka.NewReader(*InitKafkaReaderConfig("localhost:9092", kafkaTopicPrefix+"_"+strings.ToLower(okxExchange), consumerGroup))
-	bybitReader := kafka.NewReader(*InitKafkaReaderConfig("localhost:9092", kafkaTopicPrefix+"_"+strings.ToLower(bybitExchange), consumerGroup))
+	binanceReader := kafka.NewReader(*InitKafkaReaderConfig(cfg.Kafka.Broker, cfg.Kafka.TopicPrefix+"_"+strings.ToLower(binanceExchange), consumerGroup))
+	okxReader := kafka.NewReader(*InitKafkaReaderConfig(cfg.Kafka.Broker, cfg.Kafka.TopicPrefix+"_"+strings.ToLower(okxExchange), consumerGroup))
+	bybitReader := kafka.NewReader(*InitKafkaReaderConfig(cfg.Kafka.Broker, cfg.Kafka.TopicPrefix+"_"+strings.ToLower(bybitExchange), consumerGroup))
 
 	workerBuffer := 1000
 	timeframeConfigs := []delivery.TimeframeConfig{
@@ -142,9 +146,8 @@ func main() {
 	}
 }
 
-func InitDB() *gorm.DB {
-	dsn := "host=localhost user=postgres password=root dbname=marketpulse port=5432 sslmode=disable TimeZone=UTC"
-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+func initDB(dbCfg aggregatorConfig.DBConfig) *gorm.DB {
+	db, err := gorm.Open(postgres.Open(dbCfg.DSN()), &gorm.Config{})
 	if err != nil {
 		panic("failed to connect database")
 	}
@@ -152,11 +155,12 @@ func InitDB() *gorm.DB {
 	return db
 }
 
-func initRedisDB() *redis.Client {
+func initRedisDB(redisCfg aggregatorConfig.RedisCacheConfig) *redis.Client {
 	rdb := redis.NewClient(&redis.Options{
-		Addr:     "localhost:6379",
-		Password: "", // no password set
-		DB:       0,  // use default DB
+		Addr:     redisCfg.Addr,
+		Password: redisCfg.Password,
+		DB:       redisCfg.DB,
+		PoolSize: redisCfg.PoolSize,
 	})
 	return rdb
 }

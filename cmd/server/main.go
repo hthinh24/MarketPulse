@@ -1,6 +1,7 @@
 package main
 
 import (
+	"MarketPulse/internal/server/config"
 	"MarketPulse/internal/server/controller"
 	"MarketPulse/internal/server/infrastructure"
 	repository "MarketPulse/internal/server/infrastructure/repository/postgres"
@@ -10,6 +11,7 @@ import (
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
+	"github.com/joho/godotenv"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"log"
@@ -21,9 +23,15 @@ import (
 )
 
 func main() {
-	// TODO(refactor): Move Init function to separate package and use dependency injection
-	db := InitDB()
-	rdb := initRedisDB()
+	_ = godotenv.Load()
+
+	cfg, err := config.LoadAppConfig()
+	if err != nil {
+		log.Fatalf("Failed to load config: %v", err)
+	}
+
+	db := initDB(cfg.DB)
+	rdb := initRedisDB(cfg.Redis)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -55,7 +63,7 @@ func main() {
 	candleController.RegisterRoutes(v1)
 
 	srv := &http.Server{
-		Addr:    ":8000",
+		Addr:    ":" + cfg.Port,
 		Handler: r,
 	}
 
@@ -83,9 +91,8 @@ func main() {
 	}
 }
 
-func InitDB() *gorm.DB {
-	dsn := "host=localhost user=postgres password=root dbname=marketpulse port=5432 sslmode=disable TimeZone=UTC"
-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+func initDB(dbCfg config.DBConfig) *gorm.DB {
+	db, err := gorm.Open(postgres.Open(dbCfg.DSN()), &gorm.Config{})
 	if err != nil {
 		panic("failed to connect database")
 	}
@@ -93,11 +100,12 @@ func InitDB() *gorm.DB {
 	return db
 }
 
-func initRedisDB() *redis.Client {
+func initRedisDB(redisCfg config.RedisCacheConfig) *redis.Client {
 	rdb := redis.NewClient(&redis.Options{
-		Addr:     "localhost:6379",
-		Password: "",
-		DB:       0,
+		Addr:     redisCfg.Addr,
+		Password: redisCfg.Password,
+		DB:       redisCfg.DB,
+		PoolSize: redisCfg.PoolSize,
 	})
 	return rdb
 }

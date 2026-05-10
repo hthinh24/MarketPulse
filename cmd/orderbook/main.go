@@ -8,6 +8,7 @@ import (
 	"MarketPulse/internal/telemetry"
 	"context"
 	"github.com/go-redis/redis/v8"
+	"github.com/joho/godotenv"
 	"log"
 	"net/http"
 	_ "net/http/pprof"
@@ -23,29 +24,28 @@ func main() {
 		log.Println(http.ListenAndServe("localhost:6060", nil))
 	}()
 
+	_ = godotenv.Load()
+
+	cfg, err := config.LoadAppConfig()
+	if err != nil {
+		log.Fatalf("Failed to load config: %v", err)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	serviceName := "marketpulse-orderbook"
-	otlpEndpoint := "localhost:4317"
 
-	shutdown := telemetry.InitProvider(serviceName, otlpEndpoint)
+	shutdown := telemetry.InitProvider(serviceName, cfg.OTLP.Endpoint)
 	defer shutdown(ctx)
 
-	redisConfig := &config.RedisConfig{
-		Addr:     "localhost:6379",
-		Password: "",
-		DB:       0,
-		PoolSize: 8,
-	}
-
-	redisClient := initRedisDB(redisConfig)
+	redisClient := initRedisDB(cfg.Redis)
 	defer redisClient.Close()
 
-	exchangeConfigs := loadExchangeConfigs()
+	exchangeConfigs := loadExchangeConfigs(cfg)
 
 	publishChan := make(chan *domain.OrderBookSnapshot, 10000)
-	numOfPublishChannel := redisConfig.PoolSize
+	numOfPublishChannel := cfg.Redis.PoolSize
 	redisPublisher := publisher.NewOrderBookPublisher(redisClient)
 
 	wg := sync.WaitGroup{}
@@ -88,13 +88,13 @@ func main() {
 	}
 }
 
-func loadExchangeConfigs() []*config.ExchangeConfig {
+func loadExchangeConfigs(cfg *config.AppConfig) []*config.ExchangeConfig {
 	return []*config.ExchangeConfig{
 		{
 			Name:                   "BINANCE",
-			SymbolDiscoveryUrl:     "https://api.binance.com/api/v3/exchangeInfo",
-			SnapshotUrl:            "https://api.binance.com/api/v3/depth",
-			StreamUrl:              "wss://stream.binance.com:9443/stream",
+			SymbolDiscoveryUrl:     cfg.Binance.DiscoveryURL,
+			SnapshotUrl:            cfg.Binance.SnapshotURL,
+			StreamUrl:              cfg.Binance.StreamURL,
 			StreamBufferSize:       1000,
 			SymbolStreamBufferSize: 100,
 			DeltaQueueSize:         50,
@@ -106,9 +106,9 @@ func loadExchangeConfigs() []*config.ExchangeConfig {
 		},
 		{
 			Name:                   "BYBIT",
-			SymbolDiscoveryUrl:     "https://api.bybit.com/v5/market/instruments-info?category=spot&status=Trading",
-			SnapshotUrl:            "https://api.bybit.com/v5/market/orderbook",
-			StreamUrl:              "wss://stream.bybit.com/v5/public/spot",
+			SymbolDiscoveryUrl:     cfg.Bybit.DiscoveryURL,
+			SnapshotUrl:            cfg.Bybit.SnapshotURL,
+			StreamUrl:              cfg.Bybit.StreamURL,
 			StreamBufferSize:       1000,
 			SymbolStreamBufferSize: 100,
 			DeltaQueueSize:         500,
@@ -120,8 +120,9 @@ func loadExchangeConfigs() []*config.ExchangeConfig {
 		},
 		{
 			Name:                   "OKX",
-			SymbolDiscoveryUrl:     "https://www.okx.com/api/v5/public/instruments?instType=SPOT",
-			StreamUrl:              "wss://ws.okx.com:8443/ws/v5/public",
+			SymbolDiscoveryUrl:     cfg.OKX.DiscoveryURL,
+			SnapshotUrl:            cfg.OKX.SnapshotURL,
+			StreamUrl:              cfg.OKX.StreamURL,
 			StreamBufferSize:       1000,
 			SymbolStreamBufferSize: 100,
 			DeltaQueueSize:         100,
@@ -134,11 +135,11 @@ func loadExchangeConfigs() []*config.ExchangeConfig {
 	}
 }
 
-func initRedisDB(config *config.RedisConfig) *redis.Client {
+func initRedisDB(redisCfg config.RedisPubSubConfig) *redis.Client {
 	return redis.NewClient(&redis.Options{
-		Addr:     config.Addr,
-		Password: config.Password,
-		DB:       config.DB,
-		PoolSize: config.PoolSize,
+		Addr:     redisCfg.Addr,
+		Password: redisCfg.Password,
+		DB:       redisCfg.DB,
+		PoolSize: redisCfg.PoolSize,
 	})
 }

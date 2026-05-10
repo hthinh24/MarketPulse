@@ -2,13 +2,14 @@ package main
 
 import (
 	"MarketPulse/internal/broadcaster"
-	"MarketPulse/internal/broadcaster/config"
+	broadcasterConfig "MarketPulse/internal/broadcaster/config"
 	"MarketPulse/internal/broadcaster/controller/ws"
 	"MarketPulse/internal/broadcaster/infrastructure/observation"
 	"MarketPulse/internal/broadcaster/service"
 	"MarketPulse/internal/telemetry"
 	"context"
 	"github.com/go-redis/redis/v8"
+	"github.com/joho/godotenv"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"log"
@@ -26,28 +27,34 @@ func main() {
 		log.Println(http.ListenAndServe("localhost:6063", nil))
 	}()
 
+	_ = godotenv.Load()
+
+	cfg, err := broadcasterConfig.LoadAppConfig()
+	if err != nil {
+		log.Fatalf("Failed to load config: %v", err)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	serviceName := "marketpulse-broadcaster"
-	otlpEndpoint := "localhost:4317"
 
-	shutdown := telemetry.InitProvider(serviceName, otlpEndpoint)
+	shutdown := telemetry.InitProvider(serviceName, cfg.OTLP.Endpoint)
 	defer shutdown(ctx)
 
 	observation.BroadcastMessagesTotal.Add(ctx, 1000, metric.WithAttributes(
 		attribute.String("Test", "test"),
 	))
 
-	rdb := initRedisDB()
+	rdb := initRedisDB(cfg.Redis)
 	defer rdb.Close()
 
 	log.Print("Connected to Redis successfully!")
 
-	broadcasterConfig := config.NewBroadcasterConfig()
-	broadcasterService := service.NewBroadcasterServiceWithConfig(broadcasterConfig)
+	broadcasterServiceConfig := broadcasterConfig.NewBroadcasterConfig()
+	broadcasterService := service.NewBroadcasterServiceWithConfig(broadcasterServiceConfig)
 
-	channels := []config.ChannelMetadata{
+	channels := []broadcasterConfig.ChannelMetadata{
 		{
 			ChannelPattern: "marketpulse:candles:*",
 			ChannelPrefix:  "marketpulse:",
@@ -70,21 +77,21 @@ func main() {
 	// Start Redis subscribers
 	for _, ch := range channels {
 		wg.Add(1)
-		go func(chMetadata config.ChannelMetadata) {
+		go func(chMetadata broadcasterConfig.ChannelMetadata) {
 			defer wg.Done()
 			log.Print("Starting Redis subscriber...")
 			broadcaster.StartRedisSubscriber(ctx, rdb, broadcasterService, chMetadata.ChannelPattern, chMetadata.ChannelPrefix)
 		}(ch)
 	}
 
-	log.Print("Starting WebSocket server on :8081...")
+	log.Printf("Starting WebSocket server on :%s...", cfg.Port)
 
 	wsController := ws.NewWSController(broadcasterService)
 
 	http.HandleFunc("/ws", wsController.HandleConnection)
 
 	server := &http.Server{
-		Addr: ":8081",
+		Addr: ":" + cfg.Port,
 	}
 
 	go func() {
@@ -118,10 +125,11 @@ func main() {
 	}
 }
 
-func initRedisDB() *redis.Client {
+func initRedisDB(redisCfg broadcasterConfig.RedisPubSubConfig) *redis.Client {
 	return redis.NewClient(&redis.Options{
-		Addr:     "localhost:6379",
-		Password: "",
-		DB:       0,
+		Addr:     redisCfg.Addr,
+		Password: redisCfg.Password,
+		DB:       redisCfg.DB,
+		PoolSize: redisCfg.PoolSize,
 	})
 }
