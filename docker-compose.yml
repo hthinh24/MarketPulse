@@ -5,13 +5,14 @@ services:
     image: timescale/timescaledb:latest-pg17
     container_name: marketpulse-tsdb
     ports:
-      - "${TIMESCALEDB_PORT:-5432}:5432"
+      - "${DB_PORT:-5432}:5432"
     environment:
       - POSTGRES_USER=${DB_USER}
       - POSTGRES_PASSWORD=${DB_PASSWORD}
       - POSTGRES_DB=${DB_NAME}
     volumes:
       - timescaledb-data:/var/lib/postgresql/data
+      - ./infrastructure/db/000001_init_candles_schema.up.sql:/docker-entrypoint-initdb.d/init.sql
     networks:
       - market_pulse-network
 
