@@ -2,12 +2,14 @@ package main
 
 import (
 	"MarketPulse/internal/broadcaster"
-	broadcasterConfig "MarketPulse/internal/broadcaster/config"
+	"MarketPulse/internal/broadcaster/config"
 	"MarketPulse/internal/broadcaster/controller/ws"
 	"MarketPulse/internal/broadcaster/infrastructure/observation"
 	"MarketPulse/internal/broadcaster/service"
 	"MarketPulse/internal/telemetry"
+	"MarketPulse/pkg/logger"
 	"context"
+	"fmt"
 	"github.com/go-redis/redis/v8"
 	"github.com/joho/godotenv"
 	"go.opentelemetry.io/otel/attribute"
@@ -15,6 +17,7 @@ import (
 	"log"
 	"net/http"
 	_ "net/http/pprof"
+	"os"
 	"os/signal"
 	"sync"
 	"syscall"
@@ -22,17 +25,23 @@ import (
 )
 
 func main() {
-	go func() {
-		log.Println("pprof: http://localhost:6063/debug/pprof/")
-		log.Println(http.ListenAndServe("localhost:6063", nil))
-	}()
-
 	_ = godotenv.Load()
 
-	cfg, err := broadcasterConfig.LoadAppConfig()
+	cfg, err := config.LoadAppConfig()
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
+
+	log, err := logger.New("broadcaster", cfg.Log)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to initialize logger: %v\n", err)
+		os.Exit(1)
+	}
+
+	go func() {
+		log.Info(context.Background(), "pprof server starting", logger.String("addr", "http://localhost:6063/debug/pprof/"))
+		log.Error(context.Background(), "pprof server error", fmt.Errorf("%v", http.ListenAndServe("localhost:6063", nil)))
+	}()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -49,12 +58,12 @@ func main() {
 	rdb := initRedisDB(cfg.Redis)
 	defer rdb.Close()
 
-	log.Print("Connected to Redis successfully!")
+	log.Info(context.Background(), "Connected to Redis successfully!")
 
-	broadcasterServiceConfig := broadcasterConfig.NewBroadcasterConfig()
-	broadcasterService := service.NewBroadcasterServiceWithConfig(broadcasterServiceConfig)
+	broadcasterServiceConfig := config.NewBroadcasterConfig()
+	broadcasterService := service.NewBroadcasterService(log, broadcasterServiceConfig)
 
-	channels := []broadcasterConfig.ChannelMetadata{
+	channels := []config.ChannelMetadata{
 		{
 			ChannelPattern: "marketpulse:candles:*",
 			ChannelPrefix:  "marketpulse:",
@@ -77,16 +86,16 @@ func main() {
 	// Start Redis subscribers
 	for _, ch := range channels {
 		wg.Add(1)
-		go func(chMetadata broadcasterConfig.ChannelMetadata) {
+		go func(chMetadata config.ChannelMetadata) {
 			defer wg.Done()
-			log.Print("Starting Redis subscriber...")
+			log.Info(context.Background(), "Starting Redis subscriber", logger.String("pattern", chMetadata.ChannelPattern))
 			broadcaster.StartRedisSubscriber(ctx, rdb, broadcasterService, chMetadata.ChannelPattern, chMetadata.ChannelPrefix)
 		}(ch)
 	}
 
-	log.Printf("Starting WebSocket server on :%s...", cfg.Port)
+	log.Info(context.Background(), "Starting Websocket server", logger.String("port", cfg.Port))
 
-	wsController := ws.NewWSController(broadcasterService)
+	wsController := ws.NewWSController(log, broadcasterService)
 
 	http.HandleFunc("/ws", wsController.HandleConnection)
 
@@ -96,19 +105,19 @@ func main() {
 
 	go func() {
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Failed to start WebSocket server: %v", err)
+			log.Error(context.Background(), "Failed to listen and serve", err)
 		}
 	}()
 
 	<-ctx.Done()
 
-	log.Println("Shutdown signal received, waiting for ongoing operations to finish...")
+	log.Info(context.Background(), "Shutdown signal received, waiting for ongoing operations to finish...")
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		log.Printf("Server shutdown error: %v", err)
+		log.Error(context.Background(), "Failed to shutdown server", err)
 	}
 
 	doneChan := make(chan struct{})
@@ -119,13 +128,14 @@ func main() {
 
 	select {
 	case <-doneChan:
-		log.Println("All services shutdown gracefully")
+		//log.Println("All services shutdown gracefully")
+		log.Info(context.Background(), "All services shutdown gracefully")
 	case <-shutdownCtx.Done():
-		log.Println("Timeout reached during graceful shutdown")
+		log.Info(context.Background(), "Timeout reached during graceful shutdown")
 	}
 }
 
-func initRedisDB(redisCfg broadcasterConfig.RedisPubSubConfig) *redis.Client {
+func initRedisDB(redisCfg config.RedisPubSubConfig) *redis.Client {
 	return redis.NewClient(&redis.Options{
 		Addr:     redisCfg.Addr,
 		Password: redisCfg.Password,

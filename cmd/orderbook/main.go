@@ -6,12 +6,15 @@ import (
 	"MarketPulse/internal/orderbook/infrastructure/delivery"
 	"MarketPulse/internal/orderbook/infrastructure/publisher"
 	"MarketPulse/internal/telemetry"
+	"MarketPulse/pkg/logger"
 	"context"
+	"fmt"
 	"github.com/go-redis/redis/v8"
 	"github.com/joho/godotenv"
 	"log"
 	"net/http"
 	_ "net/http/pprof"
+	"os"
 	"os/signal"
 	"sync"
 	"syscall"
@@ -19,17 +22,23 @@ import (
 )
 
 func main() {
-	go func() {
-		log.Println("pprof: http://localhost:6060/debug/pprof/")
-		log.Println(http.ListenAndServe("localhost:6060", nil))
-	}()
-
 	_ = godotenv.Load()
 
 	cfg, err := config.LoadAppConfig()
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
+
+	log, err := logger.New("orderbook", cfg.Log)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to initialize logger: %v\n", err)
+		os.Exit(1)
+	}
+
+	go func() {
+		log.Info(context.Background(), "pprof server starting", logger.String("addr", "http://localhost:6060/debug/pprof/"))
+		log.Error(context.Background(), "pprof server error", fmt.Errorf("%v", http.ListenAndServe("localhost:6060", nil)))
+	}()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -46,7 +55,7 @@ func main() {
 
 	publishChan := make(chan *domain.OrderBookSnapshot, 10000)
 	numOfPublishChannel := cfg.Redis.PoolSize
-	redisPublisher := publisher.NewOrderBookPublisher(redisClient)
+	redisPublisher := publisher.NewOrderBookPublisher(log, redisClient)
 
 	wg := sync.WaitGroup{}
 	for _, cfg := range exchangeConfigs {
@@ -55,9 +64,9 @@ func main() {
 		go func(config *config.ExchangeConfig) {
 			defer wg.Done()
 
-			adapter := delivery.NewExchangeAdapter(config)
+			adapter := delivery.NewExchangeAdapter(log, config)
 			if err := adapter.Start(ctx, publishChan); err != nil {
-				log.Printf("Adapter %s failed to start: %v", config.Name, err)
+				log.Error(ctx, "adapter failed to start", err, logger.String("exchange", config.Name))
 			}
 		}(cfg)
 	}
@@ -82,9 +91,9 @@ func main() {
 
 	select {
 	case <-doneChan:
-		log.Println("Shutdown signal received, waiting for ongoing operations to finish...")
+		log.Info(ctx, "shutdown signal received, waiting for ongoing operations to finish")
 	case <-timeoutContext.Done():
-		log.Println("Timeout reached, forcing shutdown...")
+		log.Info(ctx, "timeout reached, forcing shutdown")
 	}
 }
 

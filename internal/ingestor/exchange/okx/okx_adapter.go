@@ -2,6 +2,8 @@ package okx
 
 import (
 	"MarketPulse/internal/ingestor/producer/event"
+	"MarketPulse/pkg/logger"
+	"context"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -17,20 +19,22 @@ type OKXAdapter struct {
 	conn     *websocket.Conn
 	mu       sync.Mutex
 	stopPing chan struct{}
+	log      *logger.Logger
 }
 
-func NewOKXAdapter(url string, args []OKXArg) *OKXAdapter {
+func NewOKXAdapter(url string, args []OKXArg, log *logger.Logger) *OKXAdapter {
 	return &OKXAdapter{
 		url:      url,
 		args:     args,
 		stopPing: make(chan struct{}),
+		log:      log,
 	}
 }
 
-func (o *OKXAdapter) Connect() error {
+func (o *OKXAdapter) Connect(ctx context.Context) error {
 	conn, _, err := websocket.DefaultDialer.Dial(o.url, nil)
 	if err != nil {
-		return fmt.Errorf("OKX dial error: %w", err)
+		return fmt.Errorf("okx dial error: %w", err)
 	}
 	o.conn = conn
 
@@ -47,7 +51,7 @@ func (o *OKXAdapter) Connect() error {
 	o.mu.Unlock()
 
 	if err != nil {
-		return fmt.Errorf("OKX subscribe error: %w", err)
+		return fmt.Errorf("okx subscribe error: %w", err)
 	}
 
 	return nil
@@ -73,7 +77,7 @@ func (o *OKXAdapter) startPinger(intervalTime time.Duration) {
 	}
 }
 
-func (o *OKXAdapter) ReadTick() (event.TickEvent, error) {
+func (o *OKXAdapter) ReadTick(ctx context.Context) (event.TickEvent, error) {
 	for {
 		o.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 		_, message, err := o.conn.ReadMessage()

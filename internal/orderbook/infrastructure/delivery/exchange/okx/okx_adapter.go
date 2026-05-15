@@ -6,6 +6,7 @@ import (
 	"MarketPulse/internal/orderbook/infrastructure/delivery/event"
 	"MarketPulse/internal/orderbook/infrastructure/observation"
 	"MarketPulse/internal/orderbook/service"
+	"MarketPulse/pkg/logger"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 )
 
 type OKXAdapter struct {
+	log                    *logger.Logger
 	name                   string
 	symbolDiscoveryUrl     string
 	streamUrl              string
@@ -29,8 +31,9 @@ type OKXAdapter struct {
 	writeMu                sync.Mutex // protect concurrent WriteJSON
 }
 
-func NewOKXAdapter(config *config.ExchangeConfig) *OKXAdapter {
+func NewOKXAdapter(log *logger.Logger, config *config.ExchangeConfig) *OKXAdapter {
 	return &OKXAdapter{
+		log:                    log,
 		name:                   config.Name,
 		symbolDiscoveryUrl:     config.SymbolDiscoveryUrl,
 		streamUrl:              config.StreamUrl,
@@ -45,15 +48,15 @@ func NewOKXAdapter(config *config.ExchangeConfig) *OKXAdapter {
 // Start discovers symbols, creates per-symbol workers, subscribes to WebSocket feed,
 // dispatches events to workers, and handles re-subscribe requests from workers.
 func (o *OKXAdapter) Start(ctx context.Context, publishChan chan<- *domain.OrderBookSnapshot) error {
-	log.Printf("Starting OKXAdapter for exchange: %s", o.name)
+	o.log.Info(ctx, "starting okx adapter", logger.String("exchange", o.name))
 
 	// Discover symbols
 	symbols, err := o.discoverSymbols(ctx)
 	if err != nil {
-		log.Printf("Failed to discover symbols: %v", err)
+		o.log.Error(ctx, "failed to discover symbols", err)
 		return err
 	}
-	log.Printf("Discovered %d symbols on %s", len(symbols), o.name)
+	o.log.Info(ctx, "discovered symbols", logger.Int("count", len(symbols)), logger.String("exchange", o.name))
 
 	// resyncChan: workers signal dispatcher which symbol needs re-subscription
 	resyncChan := make(chan string, len(symbols))
@@ -63,14 +66,14 @@ func (o *OKXAdapter) Start(ctx context.Context, publishChan chan<- *domain.Order
 	for _, symbol := range symbols {
 		state, err := service.NewOrderBookState(o.btreeDegree, o.snapshotQuantity)
 		if err != nil {
-			log.Printf("Failed to create OrderBookState for symbol %s: %v", symbol, err)
+			o.log.Error(ctx, "failed to create orderbook state for symbol", err, logger.String("symbol", symbol))
 			return err
 		}
 
 		ch := make(chan event.EventEnvelope, o.symbolWorkerBufferSize)
 		workerChans[symbol] = ch
 
-		worker := newOKXSymbolWorker(o.name, symbol, o.deltaQueueSize, state, ch, resyncChan)
+		worker := newOKXSymbolWorker(o.log, o.name, symbol, o.deltaQueueSize, state, ch, resyncChan)
 		go worker.run(ctx, publishChan)
 	}
 
@@ -104,7 +107,7 @@ func (o *OKXAdapter) Start(ctx context.Context, publishChan chan<- *domain.Order
 
 	// Wait for context cancellation
 	<-ctx.Done()
-	log.Printf("OKXAdapter shutting down gracefully...")
+	o.log.Info(ctx, "okx adapter shutting down gracefully")
 	close(mainChan)
 	return nil
 }
@@ -165,7 +168,7 @@ func (o *OKXAdapter) dispatch(
 				case ch <- envelope:
 				default:
 					observation.RecordEvent(ctx, o.name, "dropped_queue_full")
-					log.Printf("Warning: Dropping order book event for %s due to full channel buffer", sym)
+					o.log.Warn(ctx, "dropping order book event due to full channel buffer", logger.String("symbol", sym))
 				}
 			}
 		}
@@ -190,7 +193,7 @@ func (o *OKXAdapter) connectAndListen(ctx context.Context, symbols []string, mai
 
 		conn, _, err := websocket.DefaultDialer.DialContext(ctx, o.streamUrl, nil)
 		if err != nil {
-			log.Printf("Failed to connect OKX WebSocket: %v, retrying in 5s...", err)
+			o.log.Error(ctx, "failed to connect okx websocket", err, logger.Duration("retry_after", 5*time.Second))
 			select {
 			case <-ctx.Done():
 				return
@@ -205,7 +208,7 @@ func (o *OKXAdapter) connectAndListen(ctx context.Context, symbols []string, mai
 			args = append(args, arg)
 		}
 		if err := o.sendSubscribe(conn, args); err != nil {
-			log.Printf("Failed to subscribe: %v", err)
+			o.log.Error(ctx, "failed to subscribe", err)
 			conn.Close()
 			continue
 		}
@@ -245,17 +248,17 @@ func (o *OKXAdapter) connectAndListen(ctx context.Context, symbols []string, mai
 						// Symbol not in this chunk, ignore
 						continue
 					}
-					log.Printf("Re-subscribing OKX: %s", instId)
+					o.log.Info(ctx, "re-subscribing okx", logger.String("instId", instId))
 
 					// Unsubscribe
 					if err := o.sendUnsubscribe(conn, instId); err != nil {
-						log.Printf("Failed to unsubscribe %s: %v", instId, err)
+						o.log.Error(ctx, "failed to unsubscribe", err, logger.String("instId", instId))
 						return // connection broken, trigger reconnect
 					}
 
 					// Subscribe again
 					if err := o.sendSubscribe(conn, []OKXWSArg{{Channel: "books", InstId: instId}}); err != nil {
-						log.Printf("Failed to re-subscribe %s: %v", instId, err)
+						o.log.Error(ctx, "failed to re-subscribe", err, logger.String("instId", instId))
 						return
 					}
 				}

@@ -1,11 +1,13 @@
 package config
 
 import (
+	"MarketPulse/pkg/logger"
 	"fmt"
 	"github.com/kelseyhightower/envconfig"
 )
 
 type AppConfig struct {
+	Log   logger.LogConfig
 	OTLP  OTLPConfig
 	Redis RedisPubSubConfig
 	Port  string `envconfig:"BROADCASTER_PORT" default:"8081"`
@@ -26,6 +28,11 @@ type RedisPubSubConfig struct {
 func LoadAppConfig() (*AppConfig, error) {
 	cfg := &AppConfig{}
 
+	// Load Log config
+	if err := envconfig.Process("", &cfg.Log); err != nil {
+		return nil, fmt.Errorf("failed to load log config: %w", err)
+	}
+
 	// Load OTLP config
 	if err := envconfig.Process("", &cfg.OTLP); err != nil {
 		return nil, fmt.Errorf("failed to load otlp config: %w", err)
@@ -43,4 +50,3 @@ func LoadAppConfig() (*AppConfig, error) {
 
 	return cfg, nil
 }
-

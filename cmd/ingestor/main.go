@@ -9,10 +9,12 @@ import (
 	okx2 "MarketPulse/internal/ingestor/exchange/okx"
 	"MarketPulse/internal/ingestor/producer"
 	"MarketPulse/internal/ingestor/producer/event"
+	"MarketPulse/pkg/logger"
 	"context"
 	"fmt"
 	"github.com/joho/godotenv"
 	"log"
+	"os"
 	"os/signal"
 	"strings"
 	"sync"
@@ -29,15 +31,23 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
+	log, err := logger.New("ingestor", cfg.Log)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to initialize logger: %v\n", err)
+		os.Exit(1)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	log.Info(ctx, "ingestor service started")
 
 	var counter uint64
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
 	go func() {
-		StartTicker(ctx, ticker, &counter)
+		StartTicker(ctx, log, ticker, &counter)
 	}()
 
 	writerWg := sync.WaitGroup{}
@@ -57,9 +67,10 @@ func main() {
 
 	allStreams, err := binance2.GetActiveUSDTStreams()
 	if err != nil {
-		log.Fatalf("Err when fetching data from %s! Err:  %v", binanceExchange, err)
+		log.Error(ctx, "failed to fetch binance exchange data", err, logger.String("exchange", binanceExchange))
+		os.Exit(1)
 	}
-	log.Printf("Founded %d USDT trade pair on %s !", len(allStreams), binanceExchange)
+	log.Info(ctx, "found USDT trade pairs", logger.Int("count", len(allStreams)), logger.String("exchange", binanceExchange))
 
 	chunks := binance2.ChunkSlice(allStreams, 300)
 	for i, chunk := range chunks {
@@ -67,15 +78,16 @@ func main() {
 		streamPath := strings.Join(chunk, "/")
 		url := fmt.Sprintf("%s?streams=%s", cfg.Binance.StreamURL, streamPath)
 
-		binanceExchange := binance2.NewBinanceAdapter(url)
+		binanceExchange := binance2.NewBinanceAdapter(log, url)
 		exchangeIngestor := ingestor2.NewExchangeIngestor(
+			log,
 			binanceExchange,
 			binanceTradeChan,
 		)
 
 		pollerWg.Add(1)
 		go exchangeIngestor.Start(ctx, &pollerWg)
-		log.Printf("Started Binance poller for chunk %d with %d coins\n", i+1, len(chunk))
+		log.Info(ctx, "started binance poller", logger.Int("chunk", i+1), logger.Int("coins", len(chunk)))
 	}
 
 	// ------------------- OKX Exchange Ingestor -------------------
@@ -92,9 +104,10 @@ func main() {
 
 	okxStreams, err := okx2.GetActiveUSDTStreams()
 	if err != nil {
-		log.Fatalf("Err when fetching data from OKX! Err:  %v", err)
+		log.Error(ctx, "failed to fetch okx exchange data", err, logger.String("exchange", okxExchange))
+		os.Exit(1)
 	}
-	log.Printf("Founded %d USDT trade pair on %s !", len(okxStreams), okxExchange)
+	log.Info(ctx, "found USDT trade pairs", logger.Int("count", len(okxStreams)), logger.String("exchange", okxExchange))
 
 	okxChunks := okx2.ChunkSlice(okxStreams, 100)
 	for i, chunk := range okxChunks {
@@ -102,16 +115,18 @@ func main() {
 		okxAdapter = okx2.NewOKXAdapter(
 			cfg.OKX.StreamURL,
 			chunk,
+			log,
 		)
 
 		exchangeIngestor := ingestor2.NewExchangeIngestor(
+			log,
 			okxAdapter,
 			okxTradeChan,
 		)
 
 		pollerWg.Add(1)
 		go exchangeIngestor.Start(ctx, &pollerWg)
-		log.Printf("Started OKX poller for chunk %d with %d coins\n", i+1, len(chunk))
+		log.Info(ctx, "started okx poller", logger.Int("chunk", i+1), logger.Int("coins", len(chunk)))
 	}
 
 	// ------------------- Bybit Exchange Ingestor -------------------
@@ -128,26 +143,29 @@ func main() {
 
 	bybitStreams, err := bybit2.GetActiveUSDTStreams()
 	if err != nil {
-		log.Fatalf("Err when fetching data from %s! Err:  %v", bybitExchange, err)
+		log.Error(ctx, "failed to fetch bybit exchange data", err, logger.String("exchange", bybitExchange))
+		os.Exit(1)
 	}
-	log.Printf("Founded %d USDT trade pair on %s !", len(bybitStreams), bybitExchange)
+	log.Info(ctx, "found USDT trade pairs", logger.Int("count", len(bybitStreams)), logger.String("exchange", bybitExchange))
 
 	bybitChunks := bybit2.ChunkSlice(bybitStreams, 100)
 	for i, chunk := range bybitChunks {
 		var bybitAdapter *bybit2.BybitAdapter
 		bybitAdapter = bybit2.NewBybitAdapter(
+			log,
 			cfg.Bybit.StreamURL,
 			chunk,
 		)
 
 		exchangeIngestor := ingestor2.NewExchangeIngestor(
+			log,
 			bybitAdapter,
 			bybitTradeChan,
 		)
 
 		pollerWg.Add(1)
 		go exchangeIngestor.Start(ctx, &pollerWg)
-		log.Printf("Started Bybit poller for chunk %d with %d coins\n", i+1, len(chunk))
+		log.Info(ctx, "started bybit poller", logger.Int("chunk", i+1), logger.Int("coins", len(chunk)))
 	}
 
 	// -------------------- Graceful Shutdown Handling -------------------
@@ -171,20 +189,20 @@ func main() {
 
 	select {
 	case <-doneChan:
-		log.Println("Shutdown signal received, waiting for ongoing operations to finish...")
+		log.Info(ctx, "shutdown signal received, waiting for ongoing operations to finish")
 	case <-timeoutContext.Done():
-		log.Println("Timeout reached, forcing shutdown...")
+		log.Info(ctx, "timeout reached, forcing shutdown")
 	}
 }
 
-func StartTicker(ctx context.Context, ticker *time.Ticker, counter *uint64) {
+func StartTicker(ctx context.Context, log *logger.Logger, ticker *time.Ticker, counter *uint64) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			currentTPS := atomic.SwapUint64(counter, 0)
-			log.Printf("[Metrics] %d trades/sec\n", currentTPS)
+			log.Info(ctx, "metrics", logger.Uint64("trades_per_sec", currentTPS))
 		}
 	}
 }

@@ -2,8 +2,8 @@ package dbsync
 
 import (
 	"MarketPulse/internal/server/entity"
+	"MarketPulse/pkg/logger"
 	"context"
-	"log"
 	"sync"
 	"time"
 
@@ -17,12 +17,14 @@ type IExchangeAPIAdapter interface {
 }
 
 type ExchangeSymbolSyncer struct {
+	log      *logger.Logger
 	db       *gorm.DB
 	adapters []IExchangeAPIAdapter
 }
 
-func NewExchangeSymbolSyncer(db *gorm.DB, adapters []IExchangeAPIAdapter) *ExchangeSymbolSyncer {
+func NewExchangeSymbolSyncer(log *logger.Logger, db *gorm.DB, adapters []IExchangeAPIAdapter) *ExchangeSymbolSyncer {
 	return &ExchangeSymbolSyncer{
+		log:      log,
 		db:       db,
 		adapters: adapters,
 	}
@@ -31,9 +33,9 @@ func NewExchangeSymbolSyncer(db *gorm.DB, adapters []IExchangeAPIAdapter) *Excha
 func (s *ExchangeSymbolSyncer) Start(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
 
-	log.Println("Symbol Syncer Worker started...")
+	s.log.Info(ctx, "symbol syncer worker started")
 
-	s.syncAllExchanges()
+	s.syncAllExchanges(ctx)
 
 	ticker := time.NewTicker(24 * time.Hour)
 	defer ticker.Stop()
@@ -41,31 +43,31 @@ func (s *ExchangeSymbolSyncer) Start(ctx context.Context, wg *sync.WaitGroup) {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("Symbol Syncer Worker stopped.")
+			s.log.Info(ctx, "symbol syncer worker stopped")
 			return
 		case <-ticker.C:
-			s.syncAllExchanges()
+			s.syncAllExchanges(ctx)
 		}
 	}
 }
 
-func (s *ExchangeSymbolSyncer) syncAllExchanges() {
+func (s *ExchangeSymbolSyncer) syncAllExchanges(ctx context.Context) {
 	for _, adapter := range s.adapters {
 		exchangeCode := adapter.GetExchangeCode()
-		log.Printf("Syncing symbols for exchange: %s\n", exchangeCode)
+		s.log.Info(ctx, "syncing symbols for exchange", logger.String("exchange", exchangeCode))
 
 		symbols, err := adapter.FetchSymbols()
 		if err != nil {
-			log.Printf("Error fetching symbols for exchange %s: %v\n", exchangeCode, err)
+			s.log.Error(ctx, "error fetching symbols for exchange", err, logger.String("exchange", exchangeCode))
 			continue
 		}
 
-		s.upsertSymbols(symbols)
-		log.Printf("Finished syncing symbols for exchange: %s\n", exchangeCode)
+		s.upsertSymbols(ctx, symbols)
+		s.log.Info(ctx, "finished syncing symbols for exchange", logger.String("exchange", exchangeCode))
 	}
 }
 
-func (s *ExchangeSymbolSyncer) upsertSymbols(symbols []entity.ExchangeSymbol) {
+func (s *ExchangeSymbolSyncer) upsertSymbols(ctx context.Context, symbols []entity.ExchangeSymbol) {
 	if len(symbols) == 0 {
 		return
 	}
@@ -84,7 +86,7 @@ func (s *ExchangeSymbolSyncer) upsertSymbols(symbols []entity.ExchangeSymbol) {
 		}).Create(&batch).Error
 
 		if err != nil {
-			log.Printf("Lỗi Upsert symbols: %v\n", err)
+			s.log.Error(ctx, "error upserting symbols", err)
 		}
 	}
 }

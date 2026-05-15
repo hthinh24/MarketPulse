@@ -3,11 +3,11 @@ package redis
 import (
 	"MarketPulse/internal/server/dto"
 	"MarketPulse/internal/server/model"
+	"MarketPulse/pkg/logger"
 	"context"
 	"encoding/json"
 	"errors"
 	"github.com/go-redis/redis/v8"
-	"log"
 	"strconv"
 	"time"
 )
@@ -16,11 +16,15 @@ var keyPrefix = "marketpulse:"
 var maxCandleCacheSize = 1000
 
 type CandleCache struct {
+	log   *logger.Logger
 	redis *redis.Client
 }
 
-func NewCandleCache(redis *redis.Client) *CandleCache {
-	return &CandleCache{redis: redis}
+func NewCandleCache(log *logger.Logger, redis *redis.Client) *CandleCache {
+	return &CandleCache{
+		log:   log,
+		redis: redis,
+	}
 }
 
 // GetCandles
@@ -54,7 +58,7 @@ func (c *CandleCache) GetCandles(ctx context.Context, exchange string, symbol st
 	for _, item := range val {
 		var candle dto.CandleResponse
 		if err := json.Unmarshal([]byte(item), &candle); err != nil {
-			log.Println("Failed to unmarshal candle from Redis: " + err.Error())
+			c.log.Warn(ctx, "failed to unmarshal candle from redis", logger.Error(err))
 			continue
 		}
 		candles = append(candles, &candle)
@@ -88,17 +92,17 @@ func (c *CandleCache) SetCandles(ctx context.Context, exchange string, symbol st
 	}
 
 	if err := c.redis.ZAdd(ctx, key, zItems...).Err(); err != nil {
-		log.Println("Failed to add candles to Redis: " + err.Error())
+		c.log.Error(ctx, "failed to add candles to redis", err, logger.String("exchange", exchange), logger.String("symbol", symbol))
 		return err
 	}
 	if err := c.redis.Expire(ctx, key, ttl).Err(); err != nil {
-		log.Println("Failed to set TTL for candles in Redis: " + err.Error())
+		c.log.Error(ctx, "failed to set ttl for candles in redis", err, logger.String("exchange", exchange), logger.String("symbol", symbol))
 		return err
 	}
 
 	stop := -int64(maxCandleCacheSize) - 1
 	if err := c.redis.ZRemRangeByRank(ctx, key, 0, stop).Err(); err != nil {
-		log.Println("Failed to remove old candles from Redis: " + err.Error())
+		c.log.Error(ctx, "failed to remove old candles from redis", err, logger.String("exchange", exchange), logger.String("symbol", symbol))
 		return err
 	}
 
@@ -171,7 +175,7 @@ func (c *CandleCache) UpdateSymbolRanking(ctx context.Context, exchange string, 
 	pipe.Rename(ctx, tmpKey, key)
 	_, err := pipe.Exec(ctx)
 
-	log.Printf("Updated symbol ranking for exchange %s on Redis\n", exchange)
+	c.log.Info(ctx, "updated symbol ranking for exchange", logger.String("exchange", exchange))
 
 	return err
 }
@@ -185,7 +189,7 @@ func (c *CandleCache) GetMinStartTime(ctx context.Context, exchange string, symb
 	}
 
 	if err != nil {
-		log.Println("Failed to get min start time from Redis: " + err.Error())
+		c.log.Warn(ctx, "failed to get min start time from redis", logger.Error(err), logger.String("exchange", exchange), logger.String("symbol", symbol))
 		return 0
 	}
 
@@ -197,7 +201,7 @@ func (c *CandleCache) IsNotFoundSymbol(ctx context.Context, exchange string, sym
 
 	isMember, err := c.redis.SIsMember(ctx, key, symbol).Result()
 	if err != nil {
-		log.Println("Failed to check not found symbol in Redis: " + err.Error())
+		c.log.Warn(ctx, "failed to check not found symbol in redis", logger.Error(err), logger.String("exchange", exchange), logger.String("symbol", symbol))
 		return false
 	}
 

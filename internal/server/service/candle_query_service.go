@@ -5,9 +5,9 @@ import (
 	entity2 "MarketPulse/internal/server/entity"
 	error2 "MarketPulse/internal/server/error"
 	"MarketPulse/internal/server/model"
+	"MarketPulse/pkg/logger"
 	"context"
 	"errors"
-	"log"
 	"time"
 )
 
@@ -33,12 +33,14 @@ type ICandleCache interface {
 }
 
 type CandleQueryService struct {
+	log         *logger.Logger
 	candleCache ICandleCache
 	repository  ICandleRepository
 }
 
-func NewCandleQueryService(candleCache ICandleCache, repository ICandleRepository) *CandleQueryService {
+func NewCandleQueryService(log *logger.Logger, candleCache ICandleCache, repository ICandleRepository) *CandleQueryService {
 	return &CandleQueryService{
+		log:         log,
 		candleCache: candleCache,
 		repository:  repository,
 	}
@@ -47,26 +49,25 @@ func NewCandleQueryService(candleCache ICandleCache, repository ICandleRepositor
 func (m *CandleQueryService) GetHistoricalCandles(ctx context.Context, request *dto.GetCandlesRequest) (*dto.CandleHistoryResponse, error) {
 	isExisted := m.isSymbolExisted(ctx, request.Exchange, request.Symbol, request.Timeframe)
 	if !isExisted {
-		log.Printf("Symbol %s on exchange %s does NOT EXIST in repository, marking as NOT FOUND in cache\n", request.Symbol, request.Exchange)
+		m.log.Warn(ctx, "symbol does not exist in repository", logger.String("exchange", request.Exchange), logger.String("symbol", request.Symbol))
 		cacheErr := m.candleCache.SetNotFoundSymbol(ctx, request.Exchange, request.Symbol, 30*time.Minute)
 		if cacheErr != nil {
-			log.Printf("Failed to set NOT FOUND symbol in cache: %v", cacheErr)
+			m.log.Error(ctx, "failed to set not found symbol in cache", cacheErr)
 		}
 		return nil, errors.New("NOT FOUND")
 	}
 
 	minHotCandleStartTime := m.candleCache.GetMinStartTime(ctx, request.Exchange, request.Symbol, request.Timeframe)
 
-	log.Print("request end time: ", request.EndTime, " min hot candle start time: ", minHotCandleStartTime)
-	log.Print("is cold data: ", request.EndTime < minHotCandleStartTime)
+	m.log.Info(ctx, "cache lookup params", logger.Int64("request_end_time", request.EndTime), logger.Int64("min_hot_candle_start_time", minHotCandleStartTime))
+	m.log.Info(ctx, "cold data check", logger.Bool("is_cold_data", request.EndTime < minHotCandleStartTime))
 
 	isColdData := request.EndTime != 0 && minHotCandleStartTime != 0 && request.EndTime < minHotCandleStartTime
 	if isColdData {
-		log.Printf("Fetching purely COLD data for %s before %d", request.Symbol, request.EndTime)
-		//candles, err := m.fetchFromRepository(request.Exchange, request.Symbol, request.Timeframe, request.EndTime, request.Limit)
+		m.log.Info(ctx, "fetching purely cold data", logger.String("symbol", request.Symbol), logger.Int64("before_time", request.EndTime))
 		candles, err := m.fetchAndCache(ctx, request)
 		if err != nil {
-			log.Printf("Error fetching candles from DB: %v", err)
+			m.log.Error(ctx, "error fetching candles from db", err, logger.String("symbol", request.Symbol))
 			return nil, err
 		}
 		return createCandleHistoryResponse(request, candles, isColdData), nil
@@ -74,7 +75,7 @@ func (m *CandleQueryService) GetHistoricalCandles(ctx context.Context, request *
 
 	candleResponses, err := m.candleCache.GetCandles(ctx, request.Exchange, request.Symbol, request.Timeframe, request.Limit, request.EndTime)
 	if err != nil || len(candleResponses) == 0 {
-		log.Printf("Cache miss for exchange: %s symbol: %s in timeframe: %s startTime: %d, fetching from repository\n", request.Exchange, request.Symbol, request.Timeframe, request.EndTime)
+		m.log.Info(ctx, "cache miss", logger.String("exchange", request.Exchange), logger.String("symbol", request.Symbol), logger.String("timeframe", request.Timeframe), logger.Int64("start_time", request.EndTime))
 		candles, err := m.fetchAndCache(ctx, request)
 		if err != nil {
 			return nil, err
@@ -82,7 +83,7 @@ func (m *CandleQueryService) GetHistoricalCandles(ctx context.Context, request *
 		return createCandleHistoryResponse(request, candles, false), nil
 	}
 
-	log.Printf("Cache hit for symbol: %s, returning %d candles\n", request.Symbol, len(candleResponses))
+	m.log.Info(ctx, "cache hit", logger.String("symbol", request.Symbol), logger.Int("candle_count", len(candleResponses)))
 
 	if len(candleResponses) == request.Limit {
 		return createCandleHistoryResponse(request, candleResponses, false), nil
@@ -99,9 +100,9 @@ func (m *CandleQueryService) GetHistoricalCandles(ctx context.Context, request *
 	isCacheSlipped := oldestCandle.OpenTime == minHotCandleStartTime
 	if isCacheSlipped {
 		newEndTime := oldestCandle.OpenTime
-		olderCandles, err := m.fetchFromRepository(request.Exchange, request.Symbol, request.Timeframe, newEndTime, request.Limit-len(candleResponses))
+		olderCandles, err := m.fetchFromRepository(ctx, request.Exchange, request.Symbol, request.Timeframe, newEndTime, request.Limit-len(candleResponses))
 		if err != nil {
-			log.Printf("Error fetching slipped candles from DB: %v", err)
+			m.log.Error(ctx, "error fetching slipped candles from db", err, logger.String("symbol", request.Symbol))
 			return createCandleHistoryResponse(request, candleResponses, false), nil
 		}
 		candleResponses = append(candleResponses, olderCandles...)
@@ -132,16 +133,16 @@ func createCandleHistoryResponse(request *dto.GetCandlesRequest, candles []*dto.
 func (c *CandleQueryService) GetActiveExchanges(ctx context.Context) ([]string, error) {
 	exchanges, err := c.candleCache.GetActiveExchanges(ctx)
 	if err != nil {
-		log.Printf("Error fetching active exchanges from cache: %v\n", err)
+		c.log.Error(ctx, "error fetching active exchanges from cache", err)
 		return nil, err
 	}
 
 	if len(exchanges) != 0 {
-		log.Printf("Cache hit, returning %d active exchanges\n", len(exchanges))
+		c.log.Info(ctx, "cache hit", logger.String("event", "get_active_exchanges"), logger.Int("exchange_count", len(exchanges)))
 		return exchanges, nil
 	}
 
-	log.Println("cache miss, fetching from repository")
+	c.log.Info(ctx, "cache miss, fetching from repository", logger.String("event", "get_active_exchanges"))
 
 	exchangeScores, err := c.repository.GetExchangeQuoteVolumeScores()
 	if err != nil {
@@ -159,16 +160,16 @@ func (c *CandleQueryService) GetActiveExchanges(ctx context.Context) ([]string, 
 func (c *CandleQueryService) GetAvailableSymbols(ctx context.Context, exchange string) ([]string, error) {
 	symbols, err := c.candleCache.GetAvailableSymbols(ctx, exchange)
 	if err != nil {
-		log.Printf("Error fetching available symbols from cache: %v\n", err)
+		c.log.Error(ctx, "error fetching available symbols from cache", err, logger.String("exchange", exchange))
 		return nil, err
 	}
 
 	if len(symbols) != 0 {
-		log.Printf("Cache hit, returning %d available symbols for exchange %s\n", len(symbols), exchange)
+		c.log.Info(ctx, "cache hit", logger.String("event", "get_available_symbols"), logger.String("exchange", exchange), logger.Int("symbol_count", len(symbols)))
 		return symbols, nil
 	}
 
-	log.Println("cache miss, fetching from repository")
+	c.log.Info(ctx, "cache miss, fetching from repository", logger.String("event", "get_available_symbols"), logger.String("exchange", exchange))
 
 	symbolScores, err := c.repository.GetSymbolDayVolumeScores(exchange)
 	if err != nil {
@@ -183,11 +184,11 @@ func (c *CandleQueryService) GetAvailableSymbols(ctx context.Context, exchange s
 	return symbols, nil
 }
 
-func (m *CandleQueryService) fetchFromRepository(exchange, symbol, timeframe string, endTime int64, limit int) ([]*dto.CandleResponse, error) {
+func (m *CandleQueryService) fetchFromRepository(ctx context.Context, exchange, symbol, timeframe string, endTime int64, limit int) ([]*dto.CandleResponse, error) {
 	var entities []*entity2.CandleEntity
 	var err error
 
-	log.Printf("EndTime: %d, MinHotCandleStartTime: %d", endTime, m.candleCache.GetMinStartTime(context.Background(), exchange, symbol, "1m"))
+	m.log.Info(ctx, "repository fetch params", logger.String("exchange", exchange), logger.String("symbol", symbol), logger.Int64("end_time", endTime), logger.Int64("min_hot_candle_start_time", m.candleCache.GetMinStartTime(ctx, exchange, symbol, "1m")))
 
 	if endTime == 0 {
 		entities, err = m.repository.GetNewestCandles(exchange, symbol, timeframe, limit)
@@ -204,25 +205,25 @@ func (m *CandleQueryService) fetchFromRepository(exchange, symbol, timeframe str
 		responses[i] = m.createCandleResponse(candle)
 	}
 
-	log.Printf("Fetched %d candles from repository for exchange: %s symbol: %s in timeframe: %s\n", len(responses), exchange, symbol, timeframe)
+	m.log.Info(ctx, "fetched candles from repository", logger.String("exchange", exchange), logger.String("symbol", symbol), logger.String("timeframe", timeframe), logger.Int("candle_count", len(responses)))
 	return responses, nil
 }
 
 func (m *CandleQueryService) fetchAndCache(ctx context.Context, req *dto.GetCandlesRequest) ([]*dto.CandleResponse, error) {
-	responses, err := m.fetchFromRepository(req.Exchange, req.Symbol, req.Timeframe, req.EndTime, req.Limit)
+	responses, err := m.fetchFromRepository(ctx, req.Exchange, req.Symbol, req.Timeframe, req.EndTime, req.Limit)
 	if err != nil && errors.Is(err, error2.NOT_FOUND_ERROR) {
-		log.Printf("Symbol %s on exchange %s is NOT FOUND in repository, marking as NOT FOUND in cache\n", req.Symbol, req.Exchange)
+		m.log.Warn(ctx, "symbol not found in repository", logger.String("exchange", req.Exchange), logger.String("symbol", req.Symbol))
 
 		cacheErr := m.candleCache.SetNotFoundSymbol(ctx, req.Exchange, req.Symbol, 30*time.Minute)
 		if cacheErr != nil {
-			log.Printf("Failed to set NOT FOUND symbol in cache: %v", cacheErr)
+			m.log.Error(ctx, "failed to set not found symbol in cache", cacheErr)
 		}
 
 		return nil, errors.New("NOT FOUND")
 	}
 	err = m.candleCache.SetCandles(ctx, req.Exchange, req.Symbol, req.Timeframe, responses, 5*time.Minute)
 	if err != nil {
-		log.Printf("Failed to warm up cache: %v", err)
+		m.log.Error(ctx, "failed to warm up cache", err, logger.String("exchange", req.Exchange), logger.String("symbol", req.Symbol))
 	}
 	return responses, nil
 }
@@ -251,7 +252,7 @@ func (m *CandleQueryService) isSymbolExisted(ctx context.Context, exchange strin
 
 	isExisted, err := m.repository.IsSymbolExisted(exchange, symbol, timeframe)
 	if err != nil {
-		log.Printf("Error checking symbol existence in repository: %v\n", err)
+		m.log.Error(ctx, "error checking symbol existence in repository", err, logger.String("exchange", exchange), logger.String("symbol", symbol))
 		return false
 	}
 

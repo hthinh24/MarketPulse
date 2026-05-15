@@ -4,7 +4,9 @@ import (
 	"MarketPulse/internal/broadcaster/config"
 	"MarketPulse/internal/broadcaster/controller/ws"
 	"MarketPulse/internal/broadcaster/infrastructure/observation"
+	"MarketPulse/pkg/logger"
 	"context"
+	"fmt"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"log"
@@ -43,14 +45,16 @@ type dispatcherCmd struct {
 }
 
 type roomWorker struct {
+	log      *logger.Logger
 	room     string
 	clients  map[*ws.WSClient]bool
 	cmdChan  chan roomCmd
 	doneChan chan<- doneSignal
 }
 
-func newRoomWorker(room string, doneChan chan<- doneSignal, cmdChanSize int) *roomWorker {
+func newRoomWorker(log *logger.Logger, room string, doneChan chan<- doneSignal, cmdChanSize int) *roomWorker {
 	return &roomWorker{
+		log:      log,
 		room:     room,
 		clients:  make(map[*ws.WSClient]bool),
 		cmdChan:  make(chan roomCmd, cmdChanSize),
@@ -63,12 +67,12 @@ func (w *roomWorker) run(ctx context.Context) {
 		switch cmd.kind {
 		case cmdSubscribe:
 			w.clients[cmd.client] = true
-			log.Printf("Client %p subscribed to room: %s\n", cmd.client, w.room)
+			w.log.Info(ctx, "client subscribed to room", logger.String("client", fmt.Sprintf("%p", cmd.client)), logger.String("room", w.room))
 
 		case cmdUnsubscribe:
 			if _, exists := w.clients[cmd.client]; exists {
 				delete(w.clients, cmd.client)
-				log.Printf("Client %p unsubscribed from room: %s\n", cmd.client, w.room)
+				w.log.Info(ctx, "client unsubscribed from room", logger.String("client", fmt.Sprintf("%p", cmd.client)), logger.String("room", w.room))
 			}
 
 			if len(w.clients) == 0 {
@@ -111,7 +115,7 @@ func (w *roomWorker) handleBroadcast(ctx context.Context, cmd roomCmd) {
 
 	for _, client := range slowClients {
 		delete(w.clients, client)
-		go client.Close()
+		go client.Close(ctx)
 	}
 }
 
@@ -126,18 +130,16 @@ func (w *roomWorker) extractStreamType() string {
 }
 
 type broadcasterService struct {
+	log      *logger.Logger
 	cfg      *config.BroadcasterConfig
 	cmdChan  chan dispatcherCmd
 	doneChan chan doneSignal
 	rooms    map[string]*roomWorker
 }
 
-func NewBroadcasterService() *broadcasterService {
-	return NewBroadcasterServiceWithConfig(config.NewBroadcasterConfig())
-}
-
-func NewBroadcasterServiceWithConfig(cfg *config.BroadcasterConfig) *broadcasterService {
+func NewBroadcasterService(log *logger.Logger, cfg *config.BroadcasterConfig) *broadcasterService {
 	return &broadcasterService{
+		log:      log,
 		cmdChan:  make(chan dispatcherCmd, cfg.DispatcherCmdChanSize),
 		doneChan: make(chan doneSignal, cfg.DoneChanSize),
 		rooms:    make(map[string]*roomWorker),
@@ -183,10 +185,10 @@ func (s *broadcasterService) handleCmd(ctx context.Context, cmd dispatcherCmd) {
 			return
 		}
 
-		worker = newRoomWorker(cmd.room, s.doneChan, s.cfg.WorkerCmdChanSize)
+		worker = newRoomWorker(s.log, cmd.room, s.doneChan, s.cfg.WorkerCmdChanSize)
 		s.rooms[cmd.room] = worker
 		go worker.run(ctx)
-		log.Printf("Created new room: %s\n", cmd.room)
+		s.log.Info(ctx, "created new room", logger.String("room", cmd.room))
 	}
 
 	select {
@@ -197,7 +199,7 @@ func (s *broadcasterService) handleCmd(ctx context.Context, cmd dispatcherCmd) {
 		msgTs:  cmd.msgTs,
 	}:
 	default:
-		log.Printf("WARNING: Command channel full for room %s, dropping command of type %d\n", cmd.room, cmd.kind)
+		s.log.Warn(ctx, "command channel full, dropping command", logger.String("room", cmd.room), logger.Int("command_type", int(cmd.kind)))
 		observation.ClientDropsTotal.Add(ctx, 1, metric.WithAttributes(
 			attribute.String("reason", "dispatcher_backpressure"),
 		))
@@ -219,7 +221,7 @@ func (s *broadcasterService) SubscribeToRoom(ctx context.Context, topic string, 
 		msgTs:  time.Now(),
 	}:
 	case <-ctx.Done():
-		log.Printf("SubscribeToRoom cancelled for room %s\n", topic)
+		s.log.Warn(ctx, "subscribe to room cancelled", logger.String("room", topic))
 	}
 }
 
@@ -232,7 +234,7 @@ func (s *broadcasterService) UnsubscribeFromRoom(ctx context.Context, topic stri
 		msgTs:  time.Now(),
 	}:
 	case <-ctx.Done():
-		log.Printf("UnsubscribeFromRoom cancelled for room %s\n", topic)
+		s.log.Warn(ctx, "unsubscribe from room cancelled", logger.String("room", topic))
 	}
 }
 
@@ -255,14 +257,14 @@ func (s *broadcasterService) RemoveClient(ctx context.Context, client *ws.WSClie
 		attribute.String("reason", reason),
 	))
 
-	log.Printf("Client %p removed with reason: %s\n", client, reason)
+	s.log.Info(ctx, "client removed", logger.String("client", fmt.Sprintf("%p", client)), logger.String("reason", reason))
 }
 
 // BroadcastToRoom sends a message to all clients in a specific room
 func (s *broadcasterService) BroadcastToRoom(ctx context.Context, topic string, msg []byte) {
 	select {
 	case <-ctx.Done():
-		log.Printf("BroadcastToRoom cancelled for room %s\n", topic)
+		s.log.Warn(ctx, "broadcast to room cancelled", logger.String("room", topic))
 	case s.cmdChan <- dispatcherCmd{
 		kind:  cmdBroadcast,
 		room:  topic,

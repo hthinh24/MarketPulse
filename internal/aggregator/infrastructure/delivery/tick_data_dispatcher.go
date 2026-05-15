@@ -4,11 +4,11 @@ import (
 	"MarketPulse/internal/aggregator/application"
 	"MarketPulse/internal/aggregator/domain"
 	"MarketPulse/internal/aggregator/infrastructure/observation"
+	"MarketPulse/pkg/logger"
 	"context"
 	"github.com/bytedance/sonic"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
-	"log"
 	"sync"
 	"time"
 
@@ -22,6 +22,7 @@ type TimeframeConfig struct {
 }
 
 type Dispatcher struct {
+	log              *logger.Logger
 	exchangeName     string
 	kafkaReader      *kafka.Reader
 	timeframeStates  []string
@@ -33,8 +34,9 @@ type Dispatcher struct {
 	publishChan      chan *domain.CandleModel
 }
 
-func NewDispatcher(exchange string, reader *kafka.Reader, timeframeStates []string, workerBuffer int, timeframeConfigs []TimeframeConfig, dbChan chan<- *domain.CandleModel, publishChan chan *domain.CandleModel) *Dispatcher {
+func NewDispatcher(log *logger.Logger, exchange string, reader *kafka.Reader, timeframeStates []string, workerBuffer int, timeframeConfigs []TimeframeConfig, dbChan chan<- *domain.CandleModel, publishChan chan *domain.CandleModel) *Dispatcher {
 	return &Dispatcher{
+		log:              log,
 		exchangeName:     exchange,
 		kafkaReader:      reader,
 		timeframeStates:  timeframeStates,
@@ -50,7 +52,7 @@ func (d *Dispatcher) Start(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
 	defer d.kafkaReader.Close()
 
-	log.Printf("Start Dispatcher for %s exchange", d.exchangeName)
+	d.log.Info(ctx, "dispatcher started", logger.String("exchange", d.exchangeName))
 
 	for {
 		select {
@@ -59,13 +61,13 @@ func (d *Dispatcher) Start(ctx context.Context, wg *sync.WaitGroup) {
 		default:
 			msg, err := d.kafkaReader.ReadMessage(ctx)
 			if err != nil {
-				log.Println("Error reading Kafka message:", err)
+				d.log.Error(ctx, "error reading kafka message", err)
 				continue
 			}
 
 			var tickData domain.TickModel
 			if err := sonic.Unmarshal(msg.Value, &tickData); err != nil {
-				log.Println("Error unmarshalling tickEvent data:", err)
+				d.log.Error(ctx, "error unmarshalling tick event data", err)
 				continue
 			}
 

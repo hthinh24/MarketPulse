@@ -2,8 +2,8 @@ package infrastructure
 
 import (
 	"MarketPulse/internal/server/model"
+	"MarketPulse/pkg/logger"
 	"context"
-	"log"
 	"sync"
 	"time"
 )
@@ -19,13 +19,15 @@ type ICandleCache interface {
 }
 
 type SymbolRankingUpdater struct {
+	log              *logger.Logger
 	candleRepository ICandleRepository
 	candleCache      ICandleCache
 	intervalTime     time.Duration
 }
 
-func NewSymbolRankingUpdater(candleRepository ICandleRepository, candleCache ICandleCache, intervalTime time.Duration) *SymbolRankingUpdater {
+func NewSymbolRankingUpdater(log *logger.Logger, candleRepository ICandleRepository, candleCache ICandleCache, intervalTime time.Duration) *SymbolRankingUpdater {
 	return &SymbolRankingUpdater{
+		log:              log,
 		candleRepository: candleRepository,
 		candleCache:      candleCache,
 		intervalTime:     intervalTime,
@@ -44,50 +46,50 @@ func (s *SymbolRankingUpdater) Start(ctx context.Context, wg *sync.WaitGroup) {
 		case <-ticker.C:
 			exchangeScores, err := s.candleRepository.GetExchangeQuoteVolumeScores()
 			if err != nil || len(exchangeScores) == 0 {
-				log.Printf("Failed to get exchange quote volume scores: %v", err)
+				s.log.Error(ctx, "failed to get exchange quote volume scores", err)
 				continue
 			}
 
-			if err := s.updateExchangesRanking(exchangeScores); err != nil {
-				log.Printf("Failed to update exchange rankings in cache: %v", err)
+			if err := s.updateExchangesRanking(ctx, exchangeScores); err != nil {
+				s.log.Error(ctx, "failed to update exchange rankings in cache", err)
 				continue
 			}
 
 			for _, exchangeScore := range exchangeScores {
-				err := s.updateExchangeSymbolsRanking(exchangeScore)
+				err := s.updateExchangeSymbolsRanking(ctx, exchangeScore)
 				if err != nil {
-					log.Printf("Failed to update symbol rankings for exchange %s: %v", exchangeScore.Exchange, err)
+					s.log.Error(ctx, "failed to update symbol rankings for exchange", err, logger.String("exchange", exchangeScore.Exchange))
 					continue
 				}
 			}
 
-			log.Println("Updated symbol rankings on Redis")
+			s.log.Info(ctx, "updated symbol rankings on redis")
 		}
 	}
 }
 
-func (s *SymbolRankingUpdater) updateExchangesRanking(exchangeScores []model.ExchangeScore) error {
+func (s *SymbolRankingUpdater) updateExchangesRanking(ctx context.Context, exchangeScores []model.ExchangeScore) error {
 	exchangeTTL := 30 * time.Minute
-	err := s.candleCache.UpdateExchangeRanking(context.Background(), exchangeScores, exchangeTTL)
+	err := s.candleCache.UpdateExchangeRanking(ctx, exchangeScores, exchangeTTL)
 	if err != nil {
-		log.Printf("Failed to update exchange rankings in cache: %v", err)
+		s.log.Error(ctx, "failed to update exchange rankings in cache", err)
 	}
 
 	return err
 }
 
-func (s *SymbolRankingUpdater) updateExchangeSymbolsRanking(exchangeScore model.ExchangeScore) error {
+func (s *SymbolRankingUpdater) updateExchangeSymbolsRanking(ctx context.Context, exchangeScore model.ExchangeScore) error {
 	exchange := exchangeScore.Exchange
 	symbolScores, err := s.candleRepository.GetSymbolDayVolumeScores(exchange)
 	if err != nil || len(symbolScores) == 0 {
-		log.Printf("Failed to get symbol day volume scores for exchange %s: %v", exchange, err)
+		s.log.Error(ctx, "failed to get symbol day volume scores for exchange", err, logger.String("exchange", exchange))
 		return err
 	}
 
 	symbolTTL := 30 * time.Minute
-	err = s.candleCache.UpdateSymbolRanking(context.Background(), exchange, symbolScores, symbolTTL)
+	err = s.candleCache.UpdateSymbolRanking(ctx, exchange, symbolScores, symbolTTL)
 	if err != nil {
-		log.Printf("Failed to update symbol rankings in cache for exchange %s: %v", exchange, err)
+		s.log.Error(ctx, "failed to update symbol rankings in cache for exchange", err, logger.String("exchange", exchange))
 		return err
 	}
 

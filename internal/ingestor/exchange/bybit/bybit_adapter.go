@@ -2,9 +2,10 @@ package bybit
 
 import (
 	"MarketPulse/internal/ingestor/producer/event"
+	"MarketPulse/pkg/logger"
+	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"sync"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 )
 
 type BybitAdapter struct {
+	log      *logger.Logger
 	url      string
 	args     []string // this contain list of topics, for ex: "publicTrade.BTCUSDT"
 	conn     *websocket.Conn
@@ -19,18 +21,19 @@ type BybitAdapter struct {
 	stopPing chan struct{}
 }
 
-func NewBybitAdapter(url string, args []string) *BybitAdapter {
+func NewBybitAdapter(log *logger.Logger, url string, args []string) *BybitAdapter {
 	return &BybitAdapter{
+		log:      log,
 		url:      url,
 		args:     args,
 		stopPing: make(chan struct{}),
 	}
 }
 
-func (b *BybitAdapter) Connect() error {
+func (b *BybitAdapter) Connect(ctx context.Context) error {
 	conn, _, err := websocket.DefaultDialer.Dial(b.url, nil)
 	if err != nil {
-		return fmt.Errorf("Bybit dial error: %w", err)
+		return fmt.Errorf("bybit dial error: %w", err)
 	}
 	b.conn = conn
 
@@ -54,7 +57,7 @@ func (b *BybitAdapter) Connect() error {
 		b.mu.Unlock()
 
 		if err != nil {
-			return fmt.Errorf("Bybit subscribe error: %w", err)
+			return fmt.Errorf("bybit subscribe error: %w", err)
 		}
 
 		time.Sleep(50 * time.Millisecond)
@@ -83,7 +86,7 @@ func (b *BybitAdapter) startPinger(intervalTime time.Duration) {
 	}
 }
 
-func (b *BybitAdapter) ReadTick() (event.TickEvent, error) {
+func (b *BybitAdapter) ReadTick(ctx context.Context) (event.TickEvent, error) {
 	for {
 		b.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 		_, message, err := b.conn.ReadMessage()
@@ -93,7 +96,9 @@ func (b *BybitAdapter) ReadTick() (event.TickEvent, error) {
 
 		var payload BybitWsPayload
 		if err := json.Unmarshal(message, &payload); err != nil {
-			log.Printf("Failed to unmarshal Bybit WebSocket message: %s, error: %v\n", string(message), err)
+			b.log.Warn(ctx, "failed to unmarshal bybit websocket message",
+				logger.Error(err),
+			)
 			continue
 		}
 

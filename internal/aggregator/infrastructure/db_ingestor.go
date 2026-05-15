@@ -3,21 +3,23 @@ package infrastructure
 import (
 	"MarketPulse/internal/aggregator/application"
 	"MarketPulse/internal/aggregator/domain"
+	"MarketPulse/pkg/logger"
 	"context"
-	"log"
 	"sync"
 	"time"
 )
 
 type DBIngestor struct {
+	log         *logger.Logger
 	saveChan    <-chan *domain.CandleModel
 	candleCache application.ICandleCache
 	repository  application.ICandleRepository
 	batchSize   int
 }
 
-func NewDBIngestor(saveChan <-chan *domain.CandleModel, candleCache application.ICandleCache, repository application.ICandleRepository, batchSize int) *DBIngestor {
+func NewDBIngestor(log *logger.Logger, saveChan <-chan *domain.CandleModel, candleCache application.ICandleCache, repository application.ICandleRepository, batchSize int) *DBIngestor {
 	return &DBIngestor{
+		log:         log,
 		saveChan:    saveChan,
 		candleCache: candleCache,
 		repository:  repository,
@@ -29,7 +31,7 @@ func (d *DBIngestor) Start(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
 	defer d.cleanUp()
 
-	log.Println("DB Ingestor started")
+	d.log.Info(ctx, "db ingestor started")
 
 	batch := make([]*domain.CandleModel, 0, d.batchSize)
 
@@ -39,46 +41,45 @@ func (d *DBIngestor) Start(ctx context.Context, wg *sync.WaitGroup) {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("DB Ingestor stopping due to context cancellation")
-			d.flush(batch)
+			d.log.Info(ctx, "db ingestor stopping due to context cancellation")
+			d.flush(ctx, batch)
 			return
 
 		case <-flushTicker.C:
-			batch = d.flush(batch)
+			batch = d.flush(ctx, batch)
 
 		case candle, ok := <-d.saveChan:
 			if !ok {
-				d.flush(batch)
+				d.flush(ctx, batch)
 				return
 			}
 
 			batch = append(batch, candle)
 
 			if len(batch) >= d.batchSize {
-				batch = d.flush(batch)
+				batch = d.flush(ctx, batch)
 				flushTicker.Reset(5 * time.Second)
 			}
 		}
 	}
 }
 
-func (d *DBIngestor) flush(batch []*domain.CandleModel) []*domain.CandleModel {
+func (d *DBIngestor) flush(ctx context.Context, batch []*domain.CandleModel) []*domain.CandleModel {
 	if len(batch) == 0 {
 		return batch
 	}
 
-	ctx := context.Background()
 	if err := d.repository.SaveCandles(ctx, batch); err != nil {
-		log.Printf("Failed to save batch of %d candles: %v\n", len(batch), err)
+		d.log.Error(ctx, "failed to save batch of candles", err, logger.Int("count", len(batch)))
 		// TODO: Implement retry logic or move to a dead-letter queue for failed saves
 	}
 
 	err := d.candleCache.SetCandles(ctx, batch, 5*time.Minute)
 	if err != nil {
-		log.Printf("Failed to cache batch of %d candles: %v\n", len(batch), err)
+		d.log.Error(ctx, "failed to cache batch of candles", err, logger.Int("count", len(batch)))
 	}
 
-	log.Printf("Flushed batch of %d candles to database successfully\n", len(batch))
+	d.log.Info(ctx, "flushed batch of candles to database successfully", logger.Int("count", len(batch)))
 	return make([]*domain.CandleModel, 0, d.batchSize)
 }
 

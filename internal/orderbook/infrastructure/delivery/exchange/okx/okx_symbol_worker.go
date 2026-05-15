@@ -5,16 +5,17 @@ import (
 	"MarketPulse/internal/orderbook/infrastructure/delivery/event"
 	"MarketPulse/internal/orderbook/infrastructure/observation"
 	"MarketPulse/internal/orderbook/service"
+	"MarketPulse/pkg/logger"
 	"context"
-	"log"
 	"time"
 )
 
 // OKXSymbolWorker maintains per-symbol orderbook state and sequence validation.
 // It only processes events — all external interactions (WebSocket, HTTP) are handled by the dispatcher.
 type OKXSymbolWorker struct {
+	log            *logger.Logger
 	exchange       string
-	symbol         string        // format: "BTC-USDT"
+	symbol         string // format: "BTC-USDT"
 	lastSeqId      int64
 	isSynced       bool
 	deltaQueue     []event.EventEnvelope
@@ -26,6 +27,7 @@ type OKXSymbolWorker struct {
 }
 
 func newOKXSymbolWorker(
+	log *logger.Logger,
 	exchange, symbol string,
 	deltaQueueSize int,
 	state *service.OrderBookState,
@@ -33,6 +35,7 @@ func newOKXSymbolWorker(
 	resyncChan chan<- string,
 ) *OKXSymbolWorker {
 	return &OKXSymbolWorker{
+		log:            log,
 		exchange:       exchange,
 		symbol:         symbol,
 		lastSeqId:      0,
@@ -84,7 +87,7 @@ func (w *OKXSymbolWorker) handleSnapshot(ctx context.Context, orderbookEvent eve
 	}
 	w.deltaQueue = w.deltaQueue[:0]
 
-	log.Printf("Resync succeeded for %s", w.symbol)
+	w.log.Info(ctx, "resync succeeded for symbol", logger.String("symbol", w.symbol))
 }
 
 // handleDelta applies sequence validation and state management per symbol (OKX uses prevSeqId).
@@ -94,7 +97,7 @@ func (w *OKXSymbolWorker) handleDelta(ctx context.Context, orderbookEvent event.
 	if !w.isSynced {
 		// Not synced: queue deltas until snapshot received
 		if len(w.deltaQueue) >= w.deltaQueueSize {
-			log.Printf("Delta queue overflow for %s, triggering resync...", w.symbol)
+			w.log.Info(ctx, "delta queue is full", logger.String("symbol", w.symbol))
 			w.deltaQueue = w.deltaQueue[:0]
 			w.isSynced = false
 
@@ -114,7 +117,11 @@ func (w *OKXSymbolWorker) handleDelta(ctx context.Context, orderbookEvent event.
 	// Check for sequence gap (OKX uses prevSeqId field)
 	// PrevUpdateID contains the prevSeqId from the message
 	if delta.PrevUpdateID != w.lastSeqId {
-		log.Printf("Sequence gap detected for %s: expected %d, got %d", w.symbol, w.lastSeqId, delta.PrevUpdateID)
+		w.log.Warn(ctx, "sequence gap detected",
+			logger.String("symbol", w.symbol),
+			logger.Int64("expected_prev_seq_id", w.lastSeqId),
+			logger.Int64("actual_prev_seq_id", delta.PrevUpdateID),
+		)
 		w.isSynced = false
 		w.deltaQueue = w.deltaQueue[:0]
 		observation.RecordEvent(ctx, w.exchange, "dropped_gap")
@@ -133,4 +140,3 @@ func (w *OKXSymbolWorker) handleDelta(ctx context.Context, orderbookEvent event.
 	observation.RecordEvent(ctx, w.exchange, "applied")
 	observation.SampleLatency(ctx, w.exchange, time.Since(orderbookEvent.ReceivedAt))
 }
-

@@ -1,9 +1,9 @@
 package ws
 
 import (
+	"MarketPulse/pkg/logger"
 	"context"
 	"github.com/gorilla/websocket"
-	"log"
 	"net/http"
 )
 
@@ -14,12 +14,14 @@ type IBroadcaster interface {
 }
 
 type WSController struct {
+	log         *logger.Logger
 	broadcaster IBroadcaster
 	upgrader    websocket.Upgrader
 }
 
-func NewWSController(b IBroadcaster) *WSController {
+func NewWSController(log *logger.Logger, b IBroadcaster) *WSController {
 	return &WSController{
+		log:         log,
 		broadcaster: b,
 		upgrader: websocket.Upgrader{
 			// TODO(refactor): Implement proper origin checking in production
@@ -34,20 +36,20 @@ func (c *WSController) HandleConnection(w http.ResponseWriter, r *http.Request) 
 
 	err := c.validateWSRequest(r)
 	if err != nil {
-		log.Printf("Invalid WebSocket request: %v\n", err)
+		c.log.Warn(ctx, "invalid websocket request", logger.Error(err))
 		http.Error(w, "Invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
 	exchange := r.URL.Query().Get("exchange")
 	if exchange == "" {
-		log.Printf("Missing required query parameter: exchange\n")
+		c.log.Warn(ctx, "missing required query parameter", logger.String("param", "exchange"))
 		return
 	}
 
 	symbol := r.URL.Query().Get("symbol")
 	if symbol == "" {
-		log.Printf("Missing required query parameter: symbol\n")
+		c.log.Warn(ctx, "missing required query parameter", logger.String("param", "symbol"))
 		return
 	}
 	interval := r.URL.Query().Get("interval")
@@ -57,13 +59,13 @@ func (c *WSController) HandleConnection(w http.ResponseWriter, r *http.Request) 
 
 	streamType := r.URL.Query().Get("stream")
 	if streamType == "" {
-		log.Printf("Missing required query parameter: stream\n")
+		c.log.Warn(ctx, "missing required query parameter", logger.String("param", "stream"))
 		return
 	}
 
 	conn, err := c.upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("Failed to upgrade to WebSocket: %v\n", err)
+		c.log.Error(ctx, "failed to upgrade to websocket", err)
 		return
 	}
 
@@ -77,13 +79,13 @@ func (c *WSController) HandleConnection(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	client := NewWSClient(conn, c.broadcaster)
+	client := NewWSClient(c.log, conn, c.broadcaster)
 	defer c.broadcaster.RemoveClient(ctx, client, "disconnect")
 
 	c.broadcaster.SubscribeToRoom(ctx, room, client)
 
 	go client.readPump(ctx)
-	client.writePump()
+	client.writePump(ctx)
 }
 
 func (c *WSController) validateWSRequest(r *http.Request) error {

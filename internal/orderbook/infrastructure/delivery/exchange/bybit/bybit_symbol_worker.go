@@ -5,14 +5,15 @@ import (
 	"MarketPulse/internal/orderbook/infrastructure/delivery/event"
 	"MarketPulse/internal/orderbook/infrastructure/observation"
 	"MarketPulse/internal/orderbook/service"
+	"MarketPulse/pkg/logger"
 	"context"
-	"log"
 	"time"
 )
 
 // BybitSymbolWorker maintains per-symbol orderbook state and sequence validation.
 // It only processes events — all external interactions (WebSocket, HTTP) are handled by the dispatcher.
 type BybitSymbolWorker struct {
+	log            *logger.Logger
 	exchange       string
 	symbol         string
 	lastUpdateID   int64
@@ -26,6 +27,7 @@ type BybitSymbolWorker struct {
 }
 
 func newBybitSymbolWorker(
+	log *logger.Logger,
 	exchange, symbol string,
 	deltaQueueSize int,
 	state *service.OrderBookState,
@@ -33,6 +35,7 @@ func newBybitSymbolWorker(
 	resyncChan chan<- string,
 ) *BybitSymbolWorker {
 	return &BybitSymbolWorker{
+		log:            log,
 		exchange:       exchange,
 		symbol:         symbol,
 		lastUpdateID:   0,
@@ -59,7 +62,7 @@ func (w *BybitSymbolWorker) run(ctx context.Context, publishChan chan<- *domain.
 			if envelope.Payload.IsSnapshot {
 				w.handleSnapshot(ctx, envelope)
 			} else {
-				w.handleDelta(ctx, envelope)
+				w.handleUpdate(ctx, envelope)
 			}
 		}
 	}
@@ -84,17 +87,17 @@ func (w *BybitSymbolWorker) handleSnapshot(ctx context.Context, orderbookEvent e
 	}
 	w.deltaQueue = w.deltaQueue[:0]
 
-	log.Printf("Resync succeeded for %s", w.symbol)
+	w.log.Info(ctx, "resync succeeded", logger.String("symbol", w.symbol))
 }
 
-// handleDelta applies sequence validation and state management per symbol.
-func (w *BybitSymbolWorker) handleDelta(ctx context.Context, orderbookEvent event.EventEnvelope) {
+// handleUpdate applies sequence validation and state management per symbol.
+func (w *BybitSymbolWorker) handleUpdate(ctx context.Context, orderbookEvent event.EventEnvelope) {
 	delta := orderbookEvent.Payload
 
 	if !w.isSynced {
 		// Not synced: queue deltas until snapshot received
 		if len(w.deltaQueue) >= w.deltaQueueSize {
-			log.Printf("Delta queue overflow for %s, triggering resync...", w.symbol)
+			w.log.Warn(ctx, "delta queue overflow, triggering resync", logger.String("symbol", w.symbol))
 			w.deltaQueue = w.deltaQueue[:0]
 			w.isSynced = false
 
@@ -112,8 +115,12 @@ func (w *BybitSymbolWorker) handleDelta(ctx context.Context, orderbookEvent even
 	}
 
 	// Check for sequence gap
-	if delta.UpdateID != w.lastUpdateID+1 {
-		log.Printf("Sequence gap detected for %s: expected %d, got %d", w.symbol, w.lastUpdateID+1, delta.UpdateID)
+	if delta.PrevUpdateID > w.lastUpdateID+1 {
+		w.log.Warn(ctx, "sequence gap detected",
+			logger.String("symbol", w.symbol),
+			logger.Int64("expected", w.lastUpdateID+1),
+			logger.Int64("got", delta.PrevUpdateID),
+		)
 		w.isSynced = false
 		w.deltaQueue = w.deltaQueue[:0]
 		observation.RecordEvent(ctx, w.exchange, "dropped_gap")
@@ -132,4 +139,3 @@ func (w *BybitSymbolWorker) handleDelta(ctx context.Context, orderbookEvent even
 	observation.RecordEvent(ctx, w.exchange, "applied")
 	observation.SampleLatency(ctx, w.exchange, time.Since(orderbookEvent.ReceivedAt))
 }
-

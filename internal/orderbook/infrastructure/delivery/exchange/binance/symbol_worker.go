@@ -5,14 +5,15 @@ import (
 	"MarketPulse/internal/orderbook/infrastructure/delivery/event"
 	"MarketPulse/internal/orderbook/infrastructure/observation"
 	"MarketPulse/internal/orderbook/service"
+	"MarketPulse/pkg/logger"
 	"context"
-	"log"
 	"time"
 )
 
 // BinanceSymbolWorker maintains per-symbol orderbook state and sequence validation.
 // It only processes events — all external interactions (HTTP, WebSocket) are handled by the dispatcher.
 type BinanceSymbolWorker struct {
+	log            *logger.Logger
 	exchange       string
 	symbol         string
 	lastUpdateID   int64
@@ -26,6 +27,7 @@ type BinanceSymbolWorker struct {
 }
 
 func newBinanceSymbolWorker(
+	log *logger.Logger,
 	exchange, symbol string,
 	deltaQueueSize int,
 	state *service.OrderBookState,
@@ -33,6 +35,7 @@ func newBinanceSymbolWorker(
 	resyncChan chan<- string,
 ) *BinanceSymbolWorker {
 	return &BinanceSymbolWorker{
+		log:            log,
 		exchange:       exchange,
 		symbol:         symbol,
 		lastUpdateID:   0,
@@ -84,7 +87,7 @@ func (w *BinanceSymbolWorker) handleSnapshot(ctx context.Context, orderbookEvent
 	}
 	w.deltaQueue = w.deltaQueue[:0]
 
-	log.Printf("Resync succeeded for %s", w.symbol)
+	w.log.Info(ctx, "resync succeeded", logger.String("symbol", w.symbol))
 }
 
 // handleUpdate applies sequence validation and state management per symbol.
@@ -94,7 +97,7 @@ func (w *BinanceSymbolWorker) handleUpdate(ctx context.Context, orderbookEvent e
 	if !w.isSynced {
 		// Not synced: queue deltas until snapshot received
 		if len(w.deltaQueue) >= w.deltaQueueSize {
-			log.Printf("Delta queue overflow for %s, triggering resync...", w.symbol)
+			w.log.Warn(ctx, "delta queue overflow, triggering resync", logger.String("symbol", w.symbol))
 			w.deltaQueue = w.deltaQueue[:0]
 			w.isSynced = false
 
@@ -113,7 +116,11 @@ func (w *BinanceSymbolWorker) handleUpdate(ctx context.Context, orderbookEvent e
 
 	// Check for sequence gap
 	if delta.PrevUpdateID > w.lastUpdateID+1 {
-		log.Printf("Sequence gap detected for %s: expected %d, got %d", w.symbol, w.lastUpdateID+1, delta.PrevUpdateID)
+		w.log.Warn(ctx, "sequence gap detected",
+			logger.String("symbol", w.symbol),
+			logger.Int64("expected", w.lastUpdateID+1),
+			logger.Int64("got", delta.PrevUpdateID),
+		)
 		w.isSynced = false
 		w.deltaQueue = w.deltaQueue[:0]
 		observation.RecordEvent(ctx, w.exchange, "dropped_gap")

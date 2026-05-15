@@ -1,11 +1,13 @@
 package config
 
 import (
+	"MarketPulse/pkg/logger"
 	"fmt"
 	"github.com/kelseyhightower/envconfig"
 )
 
 type AppConfig struct {
+	Log   logger.LogConfig
 	Redis RedisCacheConfig
 	DB    DBConfig
 	Port  string `envconfig:"API_SERVER_PORT" default:"8000"`
@@ -39,6 +41,11 @@ func (d *DBConfig) DSN() string {
 // LoadAppConfig loads application configuration from environment variables
 func LoadAppConfig() (*AppConfig, error) {
 	cfg := &AppConfig{}
+	
+	// Load Log config
+	if err := envconfig.Process("", &cfg.Log); err != nil {
+		return nil, fmt.Errorf("failed to load log config: %w", err)
+	}
 
 	// Load Redis Cache config
 	if err := envconfig.Process("", &cfg.Redis); err != nil {
@@ -57,4 +64,3 @@ func LoadAppConfig() (*AppConfig, error) {
 
 	return cfg, nil
 }
-

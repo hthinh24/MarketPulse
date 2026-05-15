@@ -1,11 +1,13 @@
 package config
 
 import (
+	"MarketPulse/pkg/logger"
 	"fmt"
 	"github.com/kelseyhightower/envconfig"
 )
 
 type AppConfig struct {
+	Log     logger.LogConfig
 	Kafka   KafkaConfig
 	Binance ExchangeStreamConfig
 	Bybit   ExchangeStreamConfig
@@ -27,6 +29,11 @@ func LoadAppConfig() (*AppConfig, error) {
 		Binance: ExchangeStreamConfig{},
 		Bybit:   ExchangeStreamConfig{},
 		OKX:     ExchangeStreamConfig{},
+	}
+	
+	// Load Log config
+	if err := envconfig.Process("", &cfg.Log); err != nil {
+		return nil, fmt.Errorf("failed to load log config: %w", err)
 	}
 
 	// Load Kafka config
@@ -51,4 +58,3 @@ func LoadAppConfig() (*AppConfig, error) {
 
 	return cfg, nil
 }
-

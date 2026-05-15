@@ -6,6 +6,7 @@ import (
 	"MarketPulse/internal/orderbook/infrastructure/delivery/exchange/binance"
 	"MarketPulse/internal/orderbook/infrastructure/delivery/exchange/bybit"
 	"MarketPulse/internal/orderbook/infrastructure/delivery/exchange/okx"
+	"MarketPulse/pkg/logger"
 	"context"
 )
 
@@ -16,16 +17,16 @@ type ExchangeAdapter interface {
 	Start(ctx context.Context, publishChan chan<- *domain.OrderBookSnapshot) error
 }
 
-func NewExchangeAdapter(exchangeConfig *config.ExchangeConfig) ExchangeAdapter {
+func NewExchangeAdapter(log *logger.Logger, exchangeConfig *config.ExchangeConfig) ExchangeAdapter {
 	name := exchangeConfig.Name
 
 	switch name {
 	case "BINANCE":
-		return binance.NewBinanceAdapter(exchangeConfig)
+		return binance.NewBinanceAdapter(log, exchangeConfig)
 	case "BYBIT":
-		return bybit.NewBybitAdapter(exchangeConfig)
+		return bybit.NewBybitAdapter(log, exchangeConfig)
 	case "OKX":
-		return okx.NewOKXAdapter(exchangeConfig)
+		return okx.NewOKXAdapter(log, exchangeConfig)
 	default:
 		panic("Unsupported exchange: " + name)
 	}

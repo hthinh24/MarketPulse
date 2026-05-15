@@ -7,7 +7,9 @@ import (
 	repository "MarketPulse/internal/server/infrastructure/repository/postgres"
 	cache "MarketPulse/internal/server/infrastructure/repository/redis"
 	"MarketPulse/internal/server/service"
+	"MarketPulse/pkg/logger"
 	"context"
+	"fmt"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
@@ -16,6 +18,7 @@ import (
 	"gorm.io/gorm"
 	"log"
 	"net/http"
+	"os"
 	"os/signal"
 	"sync"
 	"syscall"
@@ -30,6 +33,12 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
+	log, err := logger.New("aggregator", cfg.Log)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to initialize logger: %v\n", err)
+		os.Exit(1)
+	}
+
 	db := initDB(cfg.DB)
 	rdb := initRedisDB(cfg.Redis)
 
@@ -38,19 +47,19 @@ func main() {
 
 	defer func() {
 		if err := rdb.Close(); err != nil {
-			log.Printf("Error closing Redis client: %v", err)
+			log.Info(ctx, "Redis client closed")
 		}
 	}()
 
 	candleRepository := repository.NewCandleRepository(db)
-	candleCache := cache.NewCandleCache(rdb)
-	candleQueryService := service.NewCandleQueryService(candleCache, candleRepository)
+	candleCache := cache.NewCandleCache(log, rdb)
+	candleQueryService := service.NewCandleQueryService(log, candleCache, candleRepository)
 	candleController := controller.NewCandleController(candleQueryService)
 
-	InitCacheWarmup(context.Background(), candleRepository, candleCache)
+	InitCacheWarmup(context.Background(), log, candleRepository, candleCache)
 
 	intervalTime := 1 * time.Hour
-	symbolRankingUpdater := infrastructure.NewSymbolRankingUpdater(candleRepository, candleCache, intervalTime)
+	symbolRankingUpdater := infrastructure.NewSymbolRankingUpdater(log, candleRepository, candleCache, intervalTime)
 
 	wg := sync.WaitGroup{}
 	wg.Add(1)
@@ -85,9 +94,9 @@ func main() {
 
 	select {
 	case <-doneChan:
-		log.Println("Shutdown signal received, waiting for ongoing operations to finish...")
+		log.Info(ctx, "shutdown signal received, waiting for ongoing operations to finish")
 	case <-timeoutContext.Done():
-		log.Println("Timeout reached, forcing shutdown...")
+		log.Info(ctx, "timeout reached, forcing shutdown")
 	}
 }
 
@@ -110,17 +119,17 @@ func initRedisDB(redisCfg config.RedisCacheConfig) *redis.Client {
 	return rdb
 }
 
-func InitCacheWarmup(ctx context.Context, repository service.ICandleRepository, cache service.ICandleCache) {
-	log.Println("Warm up cache, fetching available symbols from repository")
+func InitCacheWarmup(ctx context.Context, log *logger.Logger, repository service.ICandleRepository, cache service.ICandleCache) {
+	log.Info(ctx, "Warm up cache, fetching available symbols from repository")
 
 	exchanges, err := repository.GetExchangeQuoteVolumeScores()
 	if err != nil {
-		log.Printf("Error fetching active exchanges from repository: %v\n", err)
+		log.Error(ctx, "Error fetching active exchanges from repository", err)
 		return
 	}
 
 	if err := cache.UpdateExchangeRanking(ctx, exchanges, 24*time.Hour); err != nil {
-		log.Printf("Error setting active exchanges into cache: %v\n", err)
+		log.Error(ctx, "Error updating exchange ranking", err)
 		return
 	}
 
@@ -128,21 +137,21 @@ func InitCacheWarmup(ctx context.Context, repository service.ICandleRepository, 
 		exchangeCode := exchange.Exchange
 		symbolScores, err := repository.GetSymbolDayVolumeScores(exchangeCode)
 		if err != nil {
-			log.Printf("Error fetching available symbols from repository: %v\n", err)
+			log.Error(ctx, "Error fetching active symbols from repository", err)
 			return
 		}
 
 		if len(symbolScores) == 0 {
-			log.Printf("No available symbols found for exchange %s\n", exchangeCode)
+			log.Info(ctx, "No active symbols found", logger.String("exchange", exchangeCode))
 			continue
 		}
 
 		expiredTime := 1 * time.Hour
 		err = cache.UpdateSymbolRanking(ctx, exchangeCode, symbolScores, expiredTime)
 		if err != nil {
-			log.Printf("Error setting available symbols into cache: %v\n", err)
+			log.Error(ctx, "Error updating symbol ranking", err)
 		}
 	}
 
-	log.Println("Cache warm up completed")
+	log.Info(ctx, "Cache warm up completed")
 }

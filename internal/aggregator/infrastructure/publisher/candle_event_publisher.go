@@ -3,11 +3,11 @@ package aggregator
 import (
 	"MarketPulse/internal/aggregator/domain"
 	"MarketPulse/internal/aggregator/infrastructure/publisher/dto"
+	"MarketPulse/pkg/logger"
 	"context"
 	"fmt"
 	"github.com/bytedance/sonic"
 	"github.com/go-redis/redis/v8"
-	"log"
 	"sync"
 	"time"
 )
@@ -17,12 +17,14 @@ var channelFormat = channelPrefix + "candles:%s:%s:%s"
 var tickDuration = 250 * time.Millisecond
 
 type CandleEventPublisher struct {
+	log         *logger.Logger
 	publishChan <-chan *domain.CandleModel
 	redisClient *redis.Client
 }
 
-func NewCandleUpdatePublisher(publishChan <-chan *domain.CandleModel, redisClient *redis.Client) *CandleEventPublisher {
+func NewCandleUpdatePublisher(log *logger.Logger, publishChan <-chan *domain.CandleModel, redisClient *redis.Client) *CandleEventPublisher {
 	return &CandleEventPublisher{
+		log:         log,
 		publishChan: publishChan,
 		redisClient: redisClient,
 	}
@@ -30,7 +32,7 @@ func NewCandleUpdatePublisher(publishChan <-chan *domain.CandleModel, redisClien
 
 func (b *CandleEventPublisher) Start(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
-	log.Println("CandleEventPublisher Worker started...")
+	b.log.Info(ctx, "candle event publisher worker started")
 
 	buffer := make(map[string]dto.CandleUpdatedEvent)
 
@@ -40,7 +42,7 @@ func (b *CandleEventPublisher) Start(ctx context.Context, wg *sync.WaitGroup) {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("CandleEventPublisher stopping...")
+			b.log.Info(ctx, "candle event publisher stopping")
 			return
 
 		case candle, ok := <-b.publishChan:

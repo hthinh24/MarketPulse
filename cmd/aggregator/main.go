@@ -1,26 +1,29 @@
 package main
 
 import (
-	aggregatorConfig "MarketPulse/internal/aggregator/config"
+	"MarketPulse/internal/aggregator/config"
 	"MarketPulse/internal/aggregator/domain"
 	worker "MarketPulse/internal/aggregator/infrastructure"
 	postgres2 "MarketPulse/internal/aggregator/infrastructure/repository/postgres"
 	redis2 "MarketPulse/internal/aggregator/infrastructure/repository/redis"
+	"log"
 
 	"MarketPulse/internal/aggregator/infrastructure/dbsync"
 	adapter2 "MarketPulse/internal/aggregator/infrastructure/dbsync/adapter"
 	"MarketPulse/internal/aggregator/infrastructure/delivery"
 	aggregator "MarketPulse/internal/aggregator/infrastructure/publisher"
 	"MarketPulse/internal/telemetry"
+	"MarketPulse/pkg/logger"
 	"context"
+	"fmt"
 	"github.com/go-redis/redis/v8"
 	"github.com/joho/godotenv"
 	"github.com/segmentio/kafka-go"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
-	"log"
 	"net/http"
 	_ "net/http/pprof"
+	"os"
 	"os/signal"
 	"strings"
 	"sync"
@@ -29,17 +32,23 @@ import (
 )
 
 func main() {
-	go func() {
-		log.Println("pprof: http://localhost:6061/debug/pprof/")
-		log.Println(http.ListenAndServe("localhost:6061", nil))
-	}()
-
 	_ = godotenv.Load()
 
-	cfg, err := aggregatorConfig.LoadAppConfig()
+	cfg, err := config.LoadAppConfig()
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
+
+	log, err := logger.New("aggregator", cfg.Log)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to initialize logger: %v\n", err)
+		os.Exit(1)
+	}
+
+	go func() {
+		log.Info(context.Background(), "pprof server starting", logger.String("addr", "http://localhost:6061/debug/pprof/"))
+		log.Error(context.Background(), "pprof server error", fmt.Errorf("%v", http.ListenAndServe("localhost:6061", nil)))
+	}()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -49,7 +58,7 @@ func main() {
 	shutdown := telemetry.InitProvider(serviceName, cfg.OTLP.Endpoint)
 	defer shutdown(ctx)
 
-	db := initDB(cfg.DB)
+	db := initDB(cfg.DB, log, ctx)
 	rdb := initRedisDB(cfg.Redis)
 
 	defer func() {
@@ -67,7 +76,7 @@ func main() {
 
 	candleRepository := postgres2.NewCandleRepository(db)
 	candleCache := redis2.NewCandleCache(rdb)
-	dbIngestor := worker.NewDBIngestor(saveChan, candleCache, candleRepository, batchSize)
+	dbIngestor := worker.NewDBIngestor(log, saveChan, candleCache, candleRepository, batchSize)
 
 	consumerGroup := "aggregator-group"
 	binanceExchange := "BINANCE"
@@ -90,11 +99,11 @@ func main() {
 	}
 
 	timeframes := []string{"1m", "5m", "15m", "1h", "1d", "1w", "1M"}
-	binanceDispatcher := delivery.NewDispatcher(binanceExchange, binanceReader, timeframes, workerBuffer, timeframeConfigs, saveChan, broadcastChan)
-	okxDispatcher := delivery.NewDispatcher(okxExchange, okxReader, timeframes, workerBuffer, timeframeConfigs, saveChan, broadcastChan)
-	bybitDispatcher := delivery.NewDispatcher(bybitExchange, bybitReader, timeframes, workerBuffer, timeframeConfigs, saveChan, broadcastChan)
+	binanceDispatcher := delivery.NewDispatcher(log, binanceExchange, binanceReader, timeframes, workerBuffer, timeframeConfigs, saveChan, broadcastChan)
+	okxDispatcher := delivery.NewDispatcher(log, okxExchange, okxReader, timeframes, workerBuffer, timeframeConfigs, saveChan, broadcastChan)
+	bybitDispatcher := delivery.NewDispatcher(log, bybitExchange, bybitReader, timeframes, workerBuffer, timeframeConfigs, saveChan, broadcastChan)
 
-	candlePublisher := aggregator.NewCandleUpdatePublisher(broadcastChan, rdb)
+	candlePublisher := aggregator.NewCandleUpdatePublisher(log, broadcastChan, rdb)
 
 	binanceUrl := "https://api.binance.com/api/v3/exchangeInfo"
 	okxUrl := "https://www.okx.com/api/v5/public/instruments?instType=SPOT"
@@ -105,6 +114,7 @@ func main() {
 	bybitAdapter := adapter2.NewBybitAdapter(bybitExchange, bybitUrl)
 
 	exchangeSymbolSyncer := dbsync.NewExchangeSymbolSyncer(
+		log,
 		db,
 		[]dbsync.IExchangeAPIAdapter{binanceAdapter, okxAdapter, bybitAdapter},
 	)
@@ -140,22 +150,23 @@ func main() {
 
 	select {
 	case <-doneChan:
-		log.Println("Shutdown signal received, waiting for ongoing operations to finish...")
+		log.Info(ctx, "shutdown signal received, waiting for ongoing operations to finish")
 	case <-timeoutContext.Done():
-		log.Println("Timeout reached, forcing shutdown...")
+		log.Info(ctx, "timeout reached, forcing shutdown")
 	}
 }
 
-func initDB(dbCfg aggregatorConfig.DBConfig) *gorm.DB {
+func initDB(dbCfg config.DBConfig, log *logger.Logger, ctx context.Context) *gorm.DB {
 	db, err := gorm.Open(postgres.Open(dbCfg.DSN()), &gorm.Config{})
 	if err != nil {
-		panic("failed to connect database")
+		log.Error(ctx, "failed to connect to database", err)
+		os.Exit(1)
 	}
 
 	return db
 }
 
-func initRedisDB(redisCfg aggregatorConfig.RedisCacheConfig) *redis.Client {
+func initRedisDB(redisCfg config.RedisCacheConfig) *redis.Client {
 	rdb := redis.NewClient(&redis.Options{
 		Addr:     redisCfg.Addr,
 		Password: redisCfg.Password,

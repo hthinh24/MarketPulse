@@ -6,11 +6,11 @@ import (
 	"MarketPulse/internal/orderbook/infrastructure/delivery/event"
 	"MarketPulse/internal/orderbook/infrastructure/observation"
 	"MarketPulse/internal/orderbook/service"
+	"MarketPulse/pkg/logger"
 	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/gorilla/websocket"
-	"log"
 	"net/http"
 	"strconv"
 	"sync"
@@ -18,6 +18,7 @@ import (
 )
 
 type BybitAdapter struct {
+	log                    *logger.Logger
 	name                   string
 	symbolDiscoveryUrl     string
 	snapshotUrl            string
@@ -30,8 +31,9 @@ type BybitAdapter struct {
 	writeMu                sync.Mutex
 }
 
-func NewBybitAdapter(config *config.ExchangeConfig) *BybitAdapter {
+func NewBybitAdapter(log *logger.Logger, config *config.ExchangeConfig) *BybitAdapter {
 	return &BybitAdapter{
+		log:                    log,
 		name:                   config.Name,
 		symbolDiscoveryUrl:     config.SymbolDiscoveryUrl,
 		snapshotUrl:            config.SnapshotUrl,
@@ -47,15 +49,15 @@ func NewBybitAdapter(config *config.ExchangeConfig) *BybitAdapter {
 // Start discovers symbols, creates per-symbol workers, subscribes to WebSocket feed,
 // dispatches events to workers, and handles re-subscribe requests from workers.
 func (b *BybitAdapter) Start(ctx context.Context, publishChan chan<- *domain.OrderBookSnapshot) error {
-	log.Printf("Starting BybitAdapter for exchange: %s", b.name)
+	b.log.Info(ctx, "starting bybit adapter", logger.String("exchange", b.name))
 
 	// Discover symbols
 	symbols, err := b.discoverSymbols(ctx)
 	if err != nil {
-		log.Printf("Failed to discover symbols: %v", err)
+		b.log.Error(ctx, "failed to discover symbols", err)
 		return err
 	}
-	log.Printf("Discovered %d symbols on %s", len(symbols), b.name)
+	b.log.Info(ctx, "discovered symbols", logger.Int("count", len(symbols)), logger.String("exchange", b.name))
 
 	// resyncChan: workers signal dispatcher which symbol needs re-subscription
 	resyncChan := make(chan string, len(symbols))
@@ -65,14 +67,14 @@ func (b *BybitAdapter) Start(ctx context.Context, publishChan chan<- *domain.Ord
 	for _, symbol := range symbols {
 		state, err := service.NewOrderBookState(b.btreeDegree, b.snapshotQuantity)
 		if err != nil {
-			log.Printf("Failed to create OrderBookState for symbol %s: %v", symbol, err)
+			b.log.Error(ctx, "failed to create orderbook state for symbol", err, logger.String("symbol", symbol))
 			return err
 		}
 
 		ch := make(chan event.EventEnvelope, b.symbolWorkerBufferSize)
 		workerChans[symbol] = ch
 
-		worker := newBybitSymbolWorker(b.name, symbol, b.deltaQueueSize, state, ch, resyncChan)
+		worker := newBybitSymbolWorker(b.log, b.name, symbol, b.deltaQueueSize, state, ch, resyncChan)
 		go worker.run(ctx, publishChan)
 	}
 
@@ -106,7 +108,7 @@ func (b *BybitAdapter) Start(ctx context.Context, publishChan chan<- *domain.Ord
 
 	// Wait for context cancellation
 	<-ctx.Done()
-	log.Printf("BybitAdapter shutting down gracefully...")
+	b.log.Info(ctx, "bybit adapter shutting down gracefully")
 	close(mainChan)
 	return nil
 }
@@ -165,7 +167,7 @@ func (b *BybitAdapter) dispatch(
 				case ch <- envelope:
 				default:
 					observation.RecordEvent(ctx, b.name, "dropped_queue_full")
-					log.Printf("Warning: Dropping order book event for %s due to full channel buffer", sym)
+					b.log.Warn(ctx, "dropping order book event due to full channel buffer", logger.String("symbol", sym))
 				}
 			}
 		}
@@ -189,7 +191,7 @@ func (b *BybitAdapter) connectAndListen(ctx context.Context, symbols []string, m
 
 		conn, _, err := websocket.DefaultDialer.DialContext(ctx, b.streamUrl, nil)
 		if err != nil {
-			log.Printf("Failed to connect Bybit WebSocket: %v, retrying in 5s...", err)
+			b.log.Error(ctx, "failed to connect bybit websocket", err, logger.Duration("retry_after", 5*time.Second))
 			select {
 			case <-ctx.Done():
 				return
@@ -204,7 +206,7 @@ func (b *BybitAdapter) connectAndListen(ctx context.Context, symbols []string, m
 			topics = append(topics, topic)
 		}
 		if err := b.sendSubscribe(conn, topics); err != nil {
-			log.Printf("Failed to subscribe: %v", err)
+			b.log.Error(ctx, "failed to subscribe", err)
 			conn.Close()
 			continue
 		}
@@ -224,7 +226,7 @@ func (b *BybitAdapter) connectAndListen(ctx context.Context, symbols []string, m
 						// Symbol not in this chunk, ignore
 						continue
 					}
-					log.Printf("Re-subscribing topic: %s", topic)
+					b.log.Info(ctx, "re-subscribing topic", logger.String("topic", topic))
 
 					// Unsubscribe
 					b.writeMu.Lock()
@@ -236,13 +238,13 @@ func (b *BybitAdapter) connectAndListen(ctx context.Context, symbols []string, m
 					b.writeMu.Unlock()
 
 					if err != nil {
-						log.Printf("Failed to unsubscribe %s: %v", topic, err)
+						b.log.Error(ctx, "failed to unsubscribe", err, logger.String("topic", topic))
 						return
 					}
 
 					// Subscribe again
 					if err := b.sendSubscribe(conn, []string{topic}); err != nil {
-						log.Printf("Failed to re-subscribe %s: %v", topic, err)
+						b.log.Error(ctx, "failed to re-subscribe", err, logger.String("topic", topic))
 						return
 					}
 				}
@@ -284,7 +286,7 @@ func (b *BybitAdapter) listenAndProcess(ctx context.Context, conn *websocket.Con
 		default:
 			var msg BybitWSOrderBookMessage
 			if err := conn.ReadJSON(&msg); err != nil {
-				log.Printf("WebSocket read error: %v", err)
+				b.log.Error(ctx, "websocket read error", err)
 				return
 			}
 
@@ -295,8 +297,8 @@ func (b *BybitAdapter) listenAndProcess(ctx context.Context, conn *websocket.Con
 				UpdateID:     msg.Data.U,
 				PrevUpdateID: msg.Data.U - 1,
 				Timestamp:    time.Now().UnixMilli(),
-				Bids:         b.convertToOrderLevels(msg.Data.B),
-				Asks:         b.convertToOrderLevels(msg.Data.A),
+				Bids:         b.convertToOrderLevels(ctx, msg.Data.B),
+				Asks:         b.convertToOrderLevels(ctx, msg.Data.A),
 			}
 
 			envelope := event.EventEnvelope{
@@ -314,7 +316,7 @@ func (b *BybitAdapter) listenAndProcess(ctx context.Context, conn *websocket.Con
 }
 
 // convertToOrderLevels converts string price/size pairs to OrderLevel structs.
-func (b *BybitAdapter) convertToOrderLevels(priceSizePairs [][]string) []domain.OrderLevel {
+func (b *BybitAdapter) convertToOrderLevels(ctx context.Context, priceSizePairs [][]string) []domain.OrderLevel {
 	var orderLevels []domain.OrderLevel
 	for _, pair := range priceSizePairs {
 		if len(pair) < 2 {
@@ -323,7 +325,8 @@ func (b *BybitAdapter) convertToOrderLevels(priceSizePairs [][]string) []domain.
 		price, err1 := strconv.ParseFloat(pair[0], 64)
 		size, err2 := strconv.ParseFloat(pair[1], 64)
 		if err1 != nil || err2 != nil {
-			log.Printf("Error parsing price/size: %v, %v", err1, err2)
+			b.log.Error(ctx, "failed to discover symbols", err1, logger.String("price_str", pair[0]))
+			b.log.Error(ctx, "failed to discover symbols", err2, logger.String("size_str", pair[1]))
 			continue
 		}
 		orderLevels = append(orderLevels, domain.OrderLevel{

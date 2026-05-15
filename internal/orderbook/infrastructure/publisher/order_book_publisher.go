@@ -2,12 +2,12 @@ package publisher
 
 import (
 	"MarketPulse/internal/orderbook/domain"
+	"MarketPulse/pkg/logger"
 	"context"
 	"fmt"
 	"github.com/bytedance/sonic"
 	"github.com/go-redis/redis/v8"
 	"hash/fnv"
-	"log"
 	"time"
 )
 
@@ -17,11 +17,13 @@ var maxBatchSize = 1000
 var tickDuration = 20 * time.Millisecond
 
 type OrderBookPublisher struct {
+	log         *logger.Logger
 	redisClient *redis.Client
 }
 
-func NewOrderBookPublisher(redisClient *redis.Client) *OrderBookPublisher {
+func NewOrderBookPublisher(log *logger.Logger, redisClient *redis.Client) *OrderBookPublisher {
 	return &OrderBookPublisher{
+		log:         log,
 		redisClient: redisClient,
 	}
 }
@@ -39,14 +41,14 @@ func (p *OrderBookPublisher) Start(ctx context.Context, publishChan <-chan *doma
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("OrderBookPublisher received shutdown signal, exiting...")
+			p.log.Info(ctx, "orderbook publisher received shutdown signal, exiting")
 			for _, ch := range dispatcherChans {
 				close(ch)
 			}
 			return
 		case snapshot, ok := <-publishChan:
 			if !ok {
-				log.Println("OrderBookPublisher publish channel closed, exiting...")
+				p.log.Info(ctx, "orderbook publisher publish channel closed, exiting")
 				for _, ch := range dispatcherChans {
 					close(ch)
 				}
@@ -59,7 +61,11 @@ func (p *OrderBookPublisher) Start(ctx context.Context, publishChan <-chan *doma
 			select {
 			case dispatcherChans[workerIdx] <- snapshot:
 			default:
-				log.Printf("Worker channel %d is full, dropping snapshot for %s:%s", workerIdx, snapshot.Exchange, snapshot.Symbol)
+				p.log.Warn(ctx, "worker channel full, dropping snapshot",
+					logger.Uint32("worker_idx", workerIdx),
+					logger.String("exchange", snapshot.Exchange),
+					logger.String("symbol", snapshot.Symbol),
+				)
 			}
 		}
 	}
@@ -113,7 +119,7 @@ func (p *OrderBookPublisher) flush(ctx context.Context, batch []*domain.OrderBoo
 		room := fmt.Sprintf(channelFormat, snapshot.Exchange, snapshot.Symbol)
 		payload, err := sonic.Marshal(snapshot)
 		if err != nil {
-			log.Printf("Error marshaling snapshot for batch publish %s: %v", room, err)
+			p.log.Error(ctx, "error marshaling snapshot for batch publish", err, logger.String("room", room))
 			continue
 		}
 		pipe.Publish(ctx, room, payload)
@@ -121,7 +127,7 @@ func (p *OrderBookPublisher) flush(ctx context.Context, batch []*domain.OrderBoo
 
 	_, err := pipe.Exec(ctx)
 	if err != nil {
-		log.Printf("Error executing Redis pipeline for batch publish: %v", err)
+		p.log.Error(ctx, "error executing redis pipeline for batch publish", err)
 	}
 
 	for _, snapshot := range batch {

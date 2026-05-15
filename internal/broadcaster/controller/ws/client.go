@@ -1,9 +1,10 @@
 package ws
 
 import (
+	"MarketPulse/pkg/logger"
 	"context"
+	"fmt"
 	"github.com/gorilla/websocket"
-	"log"
 	"sync"
 	"time"
 )
@@ -18,14 +19,16 @@ const (
 // It should start by calling readPump() and writePump() in separate goroutines
 // to handle incoming and outgoing messages from server and health check (heartbeat).
 type WSClient struct {
+	log         *logger.Logger
 	conn        *websocket.Conn
 	broadcaster IBroadcaster
 	SendChan    chan []byte
 	closeOne    sync.Once
 }
 
-func NewWSClient(conn *websocket.Conn, broadcaster IBroadcaster) *WSClient {
+func NewWSClient(log *logger.Logger, conn *websocket.Conn, broadcaster IBroadcaster) *WSClient {
 	return &WSClient{
+		log:         log,
 		conn:        conn,
 		broadcaster: broadcaster,
 		SendChan:    make(chan []byte, 256),
@@ -54,7 +57,7 @@ func (c *WSClient) readPump(ctx context.Context) {
 
 // writePump sends messages from SendChan to the WebSocket connection
 // and also sends periodic ping messages for health check.
-func (c *WSClient) writePump() {
+func (c *WSClient) writePump(ctx context.Context) {
 	ticker := time.NewTicker(pingPeriod)
 	defer ticker.Stop()
 
@@ -86,9 +89,9 @@ func (c *WSClient) writePump() {
 	}
 }
 
-func (c *WSClient) Close() {
+func (c *WSClient) Close(ctx context.Context) {
 	c.closeOne.Do(func() {
-		log.Printf("Close client connection: %p\n", c)
+		c.log.Info(ctx, "closing client connection", logger.String("client", fmt.Sprintf("%p", c)))
 		close(c.SendChan)
 		c.conn.Close()
 	})
