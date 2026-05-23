@@ -8,10 +8,15 @@ import (
 
 type AppConfig struct {
 	Log     logger.LogConfig
+	OTLP    OTLPConfig
 	Kafka   KafkaConfig
 	Binance ExchangeStreamConfig
 	Bybit   ExchangeStreamConfig
 	OKX     ExchangeStreamConfig
+}
+
+type OTLPConfig struct {
+	Endpoint string `envconfig:"OTLP_ENDPOINT" default:"localhost:4317"`
 }
 
 type KafkaConfig struct {
@@ -30,10 +35,15 @@ func LoadAppConfig() (*AppConfig, error) {
 		Bybit:   ExchangeStreamConfig{},
 		OKX:     ExchangeStreamConfig{},
 	}
-	
+
 	// Load Log config
 	if err := envconfig.Process("", &cfg.Log); err != nil {
 		return nil, fmt.Errorf("failed to load log config: %w", err)
+	}
+
+	// Load OTLP config
+	if err := envconfig.Process("", &cfg.OTLP); err != nil {
+		return nil, fmt.Errorf("failed to load otlp config: %w", err)
 	}
 
 	// Load Kafka config

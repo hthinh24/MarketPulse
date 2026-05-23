@@ -2,6 +2,7 @@ package application
 
 import (
 	"MarketPulse/internal/aggregator/domain"
+	"MarketPulse/internal/aggregator/infrastructure/common"
 	"MarketPulse/internal/aggregator/infrastructure/observation"
 	"context"
 	"go.opentelemetry.io/otel/attribute"
@@ -11,12 +12,12 @@ import (
 
 type TickDataHandler struct {
 	candleService *domain.CandleService
-	inbox         <-chan *TickEvent
-	saveChan      chan<- *domain.CandleModel
-	broadcastChan chan<- *domain.CandleModel
+	inbox         <-chan common.Envelope[domain.TickModel]
+	saveChan      chan<- common.Envelope[domain.CandleModel]
+	broadcastChan chan<- common.Envelope[domain.CandleModel]
 }
 
-func NewTickDataHandler(candleService *domain.CandleService, inbox <-chan *TickEvent, saveChan chan<- *domain.CandleModel, broadcastChan chan<- *domain.CandleModel) *TickDataHandler {
+func NewTickDataHandler(candleService *domain.CandleService, inbox <-chan common.Envelope[domain.TickModel], saveChan chan<- common.Envelope[domain.CandleModel], broadcastChan chan<- common.Envelope[domain.CandleModel]) *TickDataHandler {
 	return &TickDataHandler{
 		candleService: candleService,
 		inbox:         inbox,
@@ -26,9 +27,6 @@ func NewTickDataHandler(candleService *domain.CandleService, inbox <-chan *TickE
 }
 
 func (t *TickDataHandler) Start(ctx context.Context) {
-	// Just for get sample data modulo logic
-	tickCount := 0
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -38,33 +36,36 @@ func (t *TickDataHandler) Start(ctx context.Context) {
 				return
 			}
 
-			tickData := &tickEvent.Data
-			processResult := t.candleService.ProcessTick(tickData)
-
-			tickCount++
-			if tickCount%50 == 0 {
-				latency := time.Since(tickEvent.Timestamp).Milliseconds()
-				observation.TickEventsLatencyMs.Record(ctx, float64(latency))
-			}
-
-			observation.TickEvents.Add(ctx, 1,
-				metric.WithAttributes(attribute.String("status", "processed")),
-				metric.WithAttributes(attribute.String("exchange", tickData.Exchange)),
-			)
-
-			for _, updatedCandle := range processResult.UpdatedCandles {
-				select {
-				case t.broadcastChan <- updatedCandle:
-				default:
-					observation.CandleBroadcastDropsTotal.Add(ctx, 1,
-						metric.WithAttributes(attribute.String("reason", "slow_consumer")),
-					)
-				}
-			}
-
-			for _, closedCandle := range processResult.ClosedCandles {
-				t.saveChan <- closedCandle
-			}
+			ctx := tickEvent.ExtractContext(ctx)
+			t.processTickEvent(ctx, tickEvent)
 		}
+	}
+}
+
+func (t *TickDataHandler) processTickEvent(ctx context.Context, tickEvent common.Envelope[domain.TickModel]) {
+	ctx, span := observation.Tracer.Start(ctx, "process_tick_event")
+	defer span.End()
+
+	tickData := &tickEvent.Payload
+	processResult := t.candleService.ProcessTick(tickData)
+
+	observation.TickEventsLatencyMs.Record(ctx, float64(time.Since(tickEvent.Timestamp).Milliseconds()))
+	observation.TickEvents.Add(ctx, 1,
+		metric.WithAttributes(attribute.String("status", "processed")),
+		metric.WithAttributes(attribute.String("exchange", tickData.Exchange)),
+	)
+
+	for _, updatedCandle := range processResult.UpdatedCandles {
+		select {
+		case t.broadcastChan <- common.NewEnvelope[domain.CandleModel](ctx, *updatedCandle):
+		default:
+			observation.CandleBroadcastDropsTotal.Add(ctx, 1,
+				metric.WithAttributes(attribute.String("reason", "slow_consumer")),
+			)
+		}
+	}
+
+	for _, closedCandle := range processResult.ClosedCandles {
+		t.saveChan <- common.NewEnvelope[domain.CandleModel](ctx, *closedCandle)
 	}
 }

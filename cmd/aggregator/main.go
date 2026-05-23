@@ -4,14 +4,14 @@ import (
 	"MarketPulse/internal/aggregator/config"
 	"MarketPulse/internal/aggregator/domain"
 	worker "MarketPulse/internal/aggregator/infrastructure"
-	postgres2 "MarketPulse/internal/aggregator/infrastructure/repository/postgres"
-	redis2 "MarketPulse/internal/aggregator/infrastructure/repository/redis"
-	"log"
-
+	"MarketPulse/internal/aggregator/infrastructure/common"
 	"MarketPulse/internal/aggregator/infrastructure/dbsync"
 	adapter2 "MarketPulse/internal/aggregator/infrastructure/dbsync/adapter"
 	"MarketPulse/internal/aggregator/infrastructure/delivery"
+	"MarketPulse/internal/aggregator/infrastructure/observation"
 	aggregator "MarketPulse/internal/aggregator/infrastructure/publisher"
+	postgres2 "MarketPulse/internal/aggregator/infrastructure/repository/postgres"
+	redis2 "MarketPulse/internal/aggregator/infrastructure/repository/redis"
 	"MarketPulse/internal/telemetry"
 	"MarketPulse/pkg/logger"
 	"context"
@@ -21,6 +21,7 @@ import (
 	"github.com/segmentio/kafka-go"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"log"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -55,7 +56,11 @@ func main() {
 
 	serviceName := "marketpulse-aggregator"
 
-	shutdown := telemetry.InitProvider(serviceName, cfg.OTLP.Endpoint)
+	shutdown, err := initTelemetry(ctx, serviceName, cfg.OTLP.Endpoint)
+	if err != nil {
+		log.Error(ctx, "failed to initialize telemetry", err)
+		os.Exit(1)
+	}
 	defer shutdown(ctx)
 
 	db := initDB(cfg.DB, log, ctx)
@@ -70,9 +75,9 @@ func main() {
 	batchSize := 400
 	saveChanSize := 5000
 	broadcastChanSize := 10000
-	broadcastChan := make(chan *domain.CandleModel, broadcastChanSize)
 
-	saveChan := make(chan *domain.CandleModel, saveChanSize)
+	broadcastChan := make(chan common.Envelope[domain.CandleModel], broadcastChanSize)
+	saveChan := make(chan common.Envelope[domain.CandleModel], saveChanSize)
 
 	candleRepository := postgres2.NewCandleRepository(db)
 	candleCache := redis2.NewCandleCache(rdb)
@@ -154,6 +159,26 @@ func main() {
 	case <-timeoutContext.Done():
 		log.Info(ctx, "timeout reached, forcing shutdown")
 	}
+}
+
+func initTelemetry(ctx context.Context, serviceName string, otlpEndpoint string) (func(context.Context) error, error) {
+	shutdownMetrics, err := telemetry.InitMetricsProvider(ctx, serviceName, otlpEndpoint)
+	if err != nil {
+		return nil, fmt.Errorf("metrics provider: %w", err)
+	}
+
+	shutdownTracing, err := telemetry.InitTracingProvider(ctx, serviceName, otlpEndpoint)
+	if err != nil {
+		return nil, fmt.Errorf("tracing provider: %w", err)
+	}
+	observation.InitTracer(serviceName)
+
+	return func(ctx context.Context) error {
+		if err := shutdownTracing(ctx); err != nil {
+			return err
+		}
+		return shutdownMetrics(ctx)
+	}, nil
 }
 
 func initDB(dbCfg config.DBConfig, log *logger.Logger, ctx context.Context) *gorm.DB {

@@ -7,8 +7,10 @@ import (
 	binance2 "MarketPulse/internal/ingestor/exchange/binance"
 	bybit2 "MarketPulse/internal/ingestor/exchange/bybit"
 	okx2 "MarketPulse/internal/ingestor/exchange/okx"
+	"MarketPulse/internal/ingestor/infrastructure/observation"
 	"MarketPulse/internal/ingestor/producer"
 	"MarketPulse/internal/ingestor/producer/event"
+	"MarketPulse/internal/telemetry"
 	"MarketPulse/pkg/logger"
 	"context"
 	"fmt"
@@ -31,7 +33,8 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	log, err := logger.New("ingestor", cfg.Log)
+	serviceName := "ingestor"
+	log, err := logger.New(serviceName, cfg.Log)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to initialize logger: %v\n", err)
 		os.Exit(1)
@@ -39,6 +42,13 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	shutdown, err := initTelemetry(ctx, serviceName, cfg.OTLP.Endpoint)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to init telemetry: %v\n", err)
+		os.Exit(1)
+	}
+	defer shutdown(context.Background())
 
 	log.Info(ctx, "ingestor service started")
 
@@ -54,13 +64,13 @@ func main() {
 	pollerWg := sync.WaitGroup{}
 
 	// ------------------- Binance Exchange Ingestor -------------------
-	binanceExchange := "Binance"
+	binanceExchange := "BINANCE"
 	binanceKafkaTopic := cfg.Kafka.TopicPrefix + "_" + strings.ToLower(binanceExchange)
 	kafkaWriter := kafka.NewKafkaWriter(cfg.Kafka.Broker, binanceKafkaTopic)
 	defer kafkaWriter.Close()
 
 	binanceProducerManager := producer.NewTickDataProducerManager(8)
-	binanceTradeChan := make(chan event.TickEvent, 5000)
+	binanceTradeChan := make(chan event.TickEnvelop, 5000)
 
 	writerWg.Add(1)
 	go binanceProducerManager.Start(ctx, &writerWg, binanceTradeChan, kafkaWriter, &counter)
@@ -78,7 +88,7 @@ func main() {
 		streamPath := strings.Join(chunk, "/")
 		url := fmt.Sprintf("%s?streams=%s", cfg.Binance.StreamURL, streamPath)
 
-		binanceExchange := binance2.NewBinanceAdapter(log, url)
+		binanceExchange := binance2.NewBinanceAdapter(log, binanceExchange, url)
 		exchangeIngestor := ingestor2.NewExchangeIngestor(
 			log,
 			binanceExchange,
@@ -97,7 +107,7 @@ func main() {
 	defer okxKafkaWriter.Close()
 
 	okxProducerManager := producer.NewTickDataProducerManager(8)
-	okxTradeChan := make(chan event.TickEvent, 5000)
+	okxTradeChan := make(chan event.TickEnvelop, 5000)
 
 	writerWg.Add(1)
 	go okxProducerManager.Start(ctx, &writerWg, okxTradeChan, okxKafkaWriter, &counter)
@@ -113,9 +123,10 @@ func main() {
 	for i, chunk := range okxChunks {
 		var okxAdapter *okx2.OKXAdapter
 		okxAdapter = okx2.NewOKXAdapter(
+			log,
+			okxExchange,
 			cfg.OKX.StreamURL,
 			chunk,
-			log,
 		)
 
 		exchangeIngestor := ingestor2.NewExchangeIngestor(
@@ -136,7 +147,7 @@ func main() {
 	defer bybitKafkaWriter.Close()
 
 	bybitProducerManager := producer.NewTickDataProducerManager(8)
-	bybitTradeChan := make(chan event.TickEvent, 5000)
+	bybitTradeChan := make(chan event.TickEnvelop, 5000)
 
 	writerWg.Add(1)
 	go bybitProducerManager.Start(ctx, &writerWg, bybitTradeChan, bybitKafkaWriter, &counter)
@@ -153,6 +164,7 @@ func main() {
 		var bybitAdapter *bybit2.BybitAdapter
 		bybitAdapter = bybit2.NewBybitAdapter(
 			log,
+			bybitExchange,
 			cfg.Bybit.StreamURL,
 			chunk,
 		)
@@ -193,6 +205,26 @@ func main() {
 	case <-timeoutContext.Done():
 		log.Info(ctx, "timeout reached, forcing shutdown")
 	}
+}
+
+func initTelemetry(ctx context.Context, serviceName string, otlpEndpoint string) (func(context.Context) error, error) {
+	shutdownMetrics, err := telemetry.InitMetricsProvider(ctx, serviceName, otlpEndpoint)
+	if err != nil {
+		return nil, fmt.Errorf("metrics provider: %w", err)
+	}
+
+	shutdownTracing, err := telemetry.InitTracingProvider(ctx, serviceName, otlpEndpoint)
+	if err != nil {
+		return nil, fmt.Errorf("tracing provider: %w", err)
+	}
+	observation.InitTracer(serviceName)
+
+	return func(ctx context.Context) error {
+		if err := shutdownTracing(ctx); err != nil {
+			return err
+		}
+		return shutdownMetrics(ctx)
+	}, nil
 }
 
 func StartTicker(ctx context.Context, log *logger.Logger, ticker *time.Ticker, counter *uint64) {

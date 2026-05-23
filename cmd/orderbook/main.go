@@ -4,6 +4,7 @@ import (
 	"MarketPulse/internal/orderbook/config"
 	"MarketPulse/internal/orderbook/domain"
 	"MarketPulse/internal/orderbook/infrastructure/delivery"
+	"MarketPulse/internal/orderbook/infrastructure/observation"
 	"MarketPulse/internal/orderbook/infrastructure/publisher"
 	"MarketPulse/internal/telemetry"
 	"MarketPulse/pkg/logger"
@@ -45,7 +46,11 @@ func main() {
 
 	serviceName := "marketpulse-orderbook"
 
-	shutdown := telemetry.InitProvider(serviceName, cfg.OTLP.Endpoint)
+	shutdown, err := initTelemetry(ctx, serviceName, cfg.OTLP.Endpoint)
+	if err != nil {
+		log.Error(ctx, "failed to initialize telemetry", err)
+		os.Exit(1)
+	}
 	defer shutdown(ctx)
 
 	redisClient := initRedisDB(cfg.Redis)
@@ -151,4 +156,24 @@ func initRedisDB(redisCfg config.RedisPubSubConfig) *redis.Client {
 		DB:       redisCfg.DB,
 		PoolSize: redisCfg.PoolSize,
 	})
+}
+
+func initTelemetry(ctx context.Context, serviceName string, otlpEndpoint string) (func(context.Context) error, error) {
+	shutdownMetrics, err := telemetry.InitMetricsProvider(ctx, serviceName, otlpEndpoint)
+	if err != nil {
+		return nil, fmt.Errorf("metrics provider: %w", err)
+	}
+
+	shutdownTracing, err := telemetry.InitTracingProvider(ctx, serviceName, otlpEndpoint)
+	if err != nil {
+		return nil, fmt.Errorf("tracing provider: %w", err)
+	}
+	observation.InitTracer(serviceName)
+
+	return func(ctx context.Context) error {
+		if err := shutdownTracing(ctx); err != nil {
+			return err
+		}
+		return shutdownMetrics(ctx)
+	}, nil
 }

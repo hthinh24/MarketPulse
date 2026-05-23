@@ -1,12 +1,19 @@
 package producer
 
 import (
+	"MarketPulse/internal/ingestor/infrastructure/observation"
 	"MarketPulse/internal/ingestor/producer/event"
 	"context"
-	"encoding/json"
+	"github.com/bytedance/sonic"
 	segmentio "github.com/segmentio/kafka-go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 type TickDataProducerManager struct {
@@ -16,7 +23,7 @@ type TickDataProducerManager struct {
 type TickDataProducer struct {
 	ID          int
 	kafkaWriter *segmentio.Writer
-	tradeChan   <-chan event.TickEvent
+	tradeChan   <-chan event.TickEnvelop
 	counter     *uint64
 }
 
@@ -24,7 +31,7 @@ func NewTickDataProducerManager(numWorkers int) *TickDataProducerManager {
 	return &TickDataProducerManager{numWorkers: numWorkers}
 }
 
-func (p *TickDataProducerManager) Start(ctx context.Context, wg *sync.WaitGroup, tradeChan <-chan event.TickEvent, kafkaWriter *segmentio.Writer, counter *uint64) {
+func (p *TickDataProducerManager) Start(ctx context.Context, wg *sync.WaitGroup, tradeChan <-chan event.TickEnvelop, kafkaWriter *segmentio.Writer, counter *uint64) {
 	defer wg.Done()
 
 	poolWg := sync.WaitGroup{}
@@ -47,14 +54,45 @@ func (p *TickDataProducerManager) Start(ctx context.Context, wg *sync.WaitGroup,
 
 func (p *TickDataProducer) Start(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
-	for trade := range p.tradeChan {
-		msgBytes, _ := json.Marshal(trade)
-		err := p.kafkaWriter.WriteMessages(ctx, segmentio.Message{
-			Key:   []byte(trade.Symbol),
-			Value: msgBytes,
-		})
-		if err == nil {
-			atomic.AddUint64(p.counter, 1)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case trade := <-p.tradeChan:
+			p.publishEvent(ctx, trade)
 		}
 	}
+}
+
+func (p *TickDataProducer) publishEvent(ctx context.Context, event event.TickEnvelop) {
+	ctx, span := observation.Tracer.Start(ctx, "publish_tick",
+		trace.WithAttributes(
+			attribute.String("exchange", event.Payload.Exchange),
+		),
+	)
+	defer span.End()
+
+	carrier := propagation.MapCarrier{}
+	otel.GetTextMapPropagator().Inject(ctx, carrier)
+
+	headers := make([]segmentio.Header, 0, len(carrier))
+	for k, v := range carrier {
+		headers = append(headers, segmentio.Header{Key: k, Value: []byte(v)})
+	}
+
+	event.ProducedAt = time.Now().UnixMilli()
+	msgBytes, _ := sonic.Marshal(event)
+	err := p.kafkaWriter.WriteMessages(ctx, segmentio.Message{
+		Key:     []byte(event.Payload.Symbol),
+		Value:   msgBytes,
+		Headers: headers,
+	})
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to publish tick")
+		return
+	}
+
+	atomic.AddUint64(p.counter, 1)
 }

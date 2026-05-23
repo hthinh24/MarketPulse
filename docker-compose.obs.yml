@@ -50,6 +50,19 @@ services:
     networks:
       - market_pulse-network
 
+  tempo:
+    image: grafana/tempo:2.10.0
+    container_name: marketpulse-tempo
+    depends_on:
+      - grafana
+    ports:
+      - "${TEMPO_PORT:-3200}:3200"
+    volumes:
+      - ./infrastructure/tempo/tempo.yaml:/etc/tempo.yaml
+    command: [ "-config.file=/etc/tempo.yaml" ]
+    networks:
+      - market_pulse-network
+
 networks:
   market_pulse-network:
     external: true

@@ -4,8 +4,8 @@ import (
 	"MarketPulse/internal/ingestor/producer/event"
 	"MarketPulse/pkg/logger"
 	"context"
-	"encoding/json"
 	"fmt"
+	"github.com/bytedance/sonic"
 	"strconv"
 	"sync"
 	"time"
@@ -14,20 +14,22 @@ import (
 )
 
 type OKXAdapter struct {
+	log      *logger.Logger
 	url      string
+	exchange string
 	args     []OKXArg
 	conn     *websocket.Conn
 	mu       sync.Mutex
 	stopPing chan struct{}
-	log      *logger.Logger
 }
 
-func NewOKXAdapter(url string, args []OKXArg, log *logger.Logger) *OKXAdapter {
+func NewOKXAdapter(log *logger.Logger, exchange string, url string, args []OKXArg) *OKXAdapter {
 	return &OKXAdapter{
+		log:      log,
+		exchange: exchange,
 		url:      url,
 		args:     args,
 		stopPing: make(chan struct{}),
-		log:      log,
 	}
 }
 
@@ -79,7 +81,11 @@ func (o *OKXAdapter) startPinger(intervalTime time.Duration) {
 
 func (o *OKXAdapter) ReadTick(ctx context.Context) (event.TickEvent, error) {
 	for {
-		o.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		err := o.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		if err != nil {
+			return event.TickEvent{}, err
+		}
+
 		_, message, err := o.conn.ReadMessage()
 		if err != nil {
 			return event.TickEvent{}, err
@@ -90,7 +96,7 @@ func (o *OKXAdapter) ReadTick(ctx context.Context) (event.TickEvent, error) {
 		}
 
 		var payload OKXWsPayload
-		if err := json.Unmarshal(message, &payload); err != nil {
+		if err := sonic.Unmarshal(message, &payload); err != nil {
 			continue
 		}
 
@@ -110,7 +116,7 @@ func (o *OKXAdapter) ReadTick(ctx context.Context) (event.TickEvent, error) {
 		}
 
 		tick := event.TickEvent{
-			Exchange:   "OKX",
+			Exchange:   o.exchange,
 			Symbol:     trade.InstId,
 			Price:      trade.Px,
 			Volume:     trade.Sz,

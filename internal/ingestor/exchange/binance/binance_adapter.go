@@ -4,22 +4,24 @@ import (
 	"MarketPulse/internal/ingestor/producer/event"
 	"MarketPulse/pkg/logger"
 	"context"
-	"encoding/json"
 	"fmt"
+	"github.com/bytedance/sonic"
 	"github.com/gorilla/websocket"
 	"time"
 )
 
 type BinanceAdapter struct {
-	log  *logger.Logger
-	url  string
-	conn *websocket.Conn
+	log      *logger.Logger
+	exchange string
+	url      string
+	conn     *websocket.Conn
 }
 
-func NewBinanceAdapter(log *logger.Logger, url string) *BinanceAdapter {
+func NewBinanceAdapter(log *logger.Logger, exchange string, url string) *BinanceAdapter {
 	return &BinanceAdapter{
-		log: log,
-		url: url,
+		log:      log,
+		exchange: exchange,
+		url:      url,
 	}
 }
 
@@ -34,32 +36,30 @@ func (b *BinanceAdapter) Connect(ctx context.Context) error {
 }
 
 func (b *BinanceAdapter) ReadTick(ctx context.Context) (event.TickEvent, error) {
-	var tick event.TickEvent
+	err := b.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	if err != nil {
+		return event.TickEvent{}, err
+	}
 
-	b.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	_, message, err := b.conn.ReadMessage()
 	if err != nil {
-		return tick, err
+		return event.TickEvent{}, err
 	}
 
 	var binanceWsPayload BinanceWsPayload
-	if err := json.Unmarshal(message, &binanceWsPayload); err != nil {
-		b.log.Warn(ctx, "failed to unmarshal binance websocket message",
-			logger.Error(err),
-		)
+	if err := sonic.Unmarshal(message, &binanceWsPayload); err != nil {
+		b.log.Warn(ctx, "failed to unmarshal binance websocket message", logger.Error(err))
+		return event.TickEvent{}, err
 	}
 
-	tick = event.TickEvent{
-		// TODO(refactor): Add exchange field to the payload
-		Exchange:   "BINANCE",
+	return event.TickEvent{
+		Exchange:   b.exchange,
 		Symbol:     binanceWsPayload.Data.Symbol,
 		Price:      binanceWsPayload.Data.Price,
 		Volume:     binanceWsPayload.Data.Quantity,
 		EventTime:  binanceWsPayload.Data.EventTime,
 		IsTakerBuy: !binanceWsPayload.Data.IsMaker,
-	}
-
-	return tick, err
+	}, nil
 }
 
 func (b *BinanceAdapter) Close() error {

@@ -10,14 +10,35 @@ processors:
   batch:
     timeout: 1s
     send_batch_size: 1024
+
   memory_limiter:
     check_interval: 1s
     limit_mib: 1000
+
+  tail_sampling:
+    decision_wait: 10s
+    expected_new_traces_per_sec: 1000
+    policies:
+    - name: keep-error
+      type: status_code
+      status_code: { status_codes: [ ERROR ] }
+
+    - name: keep-slow-traces
+      type: latency
+      latency: { threshold_ms: 100 }
+
+    - name: sample-healthy
+      type: probabilistic
+      probabilistic: { sampling_percentage: 10 }
 
 exporters:
   prometheus:
     endpoint: "0.0.0.0:8889"
     namespace: "marketpulse"
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
   debug:
     verbosity: detailed
 
@@ -27,3 +48,8 @@ service:
       receivers: [otlp]
       processors: [memory_limiter, batch]
       exporters: [prometheus, debug]
+
+    traces:
+      receivers: [ otlp ]
+      processors: [ memory_limiter, batch, tail_sampling ]
+      exporters: [ otlp/tempo ]

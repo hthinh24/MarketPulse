@@ -4,8 +4,8 @@ import (
 	"MarketPulse/internal/ingestor/producer/event"
 	"MarketPulse/pkg/logger"
 	"context"
-	"encoding/json"
 	"fmt"
+	"github.com/bytedance/sonic"
 	"sync"
 	"time"
 
@@ -14,6 +14,7 @@ import (
 
 type BybitAdapter struct {
 	log      *logger.Logger
+	exchange string
 	url      string
 	args     []string // this contain list of topics, for ex: "publicTrade.BTCUSDT"
 	conn     *websocket.Conn
@@ -21,9 +22,10 @@ type BybitAdapter struct {
 	stopPing chan struct{}
 }
 
-func NewBybitAdapter(log *logger.Logger, url string, args []string) *BybitAdapter {
+func NewBybitAdapter(log *logger.Logger, exchange string, url string, args []string) *BybitAdapter {
 	return &BybitAdapter{
 		log:      log,
+		exchange: exchange,
 		url:      url,
 		args:     args,
 		stopPing: make(chan struct{}),
@@ -88,14 +90,18 @@ func (b *BybitAdapter) startPinger(intervalTime time.Duration) {
 
 func (b *BybitAdapter) ReadTick(ctx context.Context) (event.TickEvent, error) {
 	for {
-		b.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		err := b.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		if err != nil {
+			return event.TickEvent{}, err
+		}
+
 		_, message, err := b.conn.ReadMessage()
 		if err != nil {
 			return event.TickEvent{}, err
 		}
 
 		var payload BybitWsPayload
-		if err := json.Unmarshal(message, &payload); err != nil {
+		if err := sonic.Unmarshal(message, &payload); err != nil {
 			b.log.Warn(ctx, "failed to unmarshal bybit websocket message",
 				logger.Error(err),
 			)
@@ -113,8 +119,7 @@ func (b *BybitAdapter) ReadTick(ctx context.Context) (event.TickEvent, error) {
 		trade := payload.Data[0]
 
 		tick := event.TickEvent{
-			// TODO(refactor): Add exchange field to the payload
-			Exchange:   "BYBIT",
+			Exchange:   b.exchange,
 			Symbol:     trade.S,
 			Price:      trade.P,
 			Volume:     trade.V,

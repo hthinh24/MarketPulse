@@ -1,10 +1,10 @@
 package main
 
 import (
-	"MarketPulse/internal/broadcaster"
 	"MarketPulse/internal/broadcaster/config"
 	"MarketPulse/internal/broadcaster/controller/ws"
 	"MarketPulse/internal/broadcaster/infrastructure/observation"
+	"MarketPulse/internal/broadcaster/infrastructure/subscriber"
 	"MarketPulse/internal/broadcaster/service"
 	"MarketPulse/internal/telemetry"
 	"MarketPulse/pkg/logger"
@@ -48,7 +48,11 @@ func main() {
 
 	serviceName := "marketpulse-broadcaster"
 
-	shutdown := telemetry.InitProvider(serviceName, cfg.OTLP.Endpoint)
+	shutdown, err := initTelemetry(ctx, serviceName, cfg.OTLP.Endpoint)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to init telemetry: %v\n", err)
+		os.Exit(1)
+	}
 	defer shutdown(ctx)
 
 	observation.BroadcastMessagesTotal.Add(ctx, 1000, metric.WithAttributes(
@@ -89,7 +93,7 @@ func main() {
 		go func(chMetadata config.ChannelMetadata) {
 			defer wg.Done()
 			log.Info(context.Background(), "Starting Redis subscriber", logger.String("pattern", chMetadata.ChannelPattern))
-			broadcaster.StartRedisSubscriber(ctx, rdb, broadcasterService, chMetadata.ChannelPattern, chMetadata.ChannelPrefix)
+			subscriber.StartRedisSubscriber(ctx, log, rdb, broadcasterService, chMetadata.ChannelPattern, chMetadata.ChannelPrefix)
 		}(ch)
 	}
 
@@ -133,6 +137,26 @@ func main() {
 	case <-shutdownCtx.Done():
 		log.Info(context.Background(), "Timeout reached during graceful shutdown")
 	}
+}
+
+func initTelemetry(ctx context.Context, serviceName string, otlpEndpoint string) (func(context.Context) error, error) {
+	shutdownMetrics, err := telemetry.InitMetricsProvider(ctx, serviceName, otlpEndpoint)
+	if err != nil {
+		return nil, fmt.Errorf("metrics provider: %w", err)
+	}
+
+	shutdownTracing, err := telemetry.InitTracingProvider(ctx, serviceName, otlpEndpoint)
+	if err != nil {
+		return nil, fmt.Errorf("tracing provider: %w", err)
+	}
+	observation.InitTracer(serviceName)
+
+	return func(ctx context.Context) error {
+		if err := shutdownTracing(ctx); err != nil {
+			return err
+		}
+		return shutdownMetrics(ctx)
+	}, nil
 }
 
 func initRedisDB(redisCfg config.RedisPubSubConfig) *redis.Client {

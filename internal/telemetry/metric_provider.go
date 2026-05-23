@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"fmt"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/contrib/instrumentation/runtime"
 	"go.opentelemetry.io/otel"
@@ -10,21 +11,18 @@ import (
 	sdkMetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	semconv "go.opentelemetry.io/otel/semconv/v1.9.0"
-	"log"
 	"os"
 	"runtime/metrics"
 	"time"
 )
 
-func InitProvider(serviceName string, grpcEndpoint string) func(context.Context) error {
-	ctx := context.Background()
-
+func InitMetricsProvider(ctx context.Context, serviceName string, grpcEndpoint string) (func(context.Context) error, error) {
 	exporter, err := otlpmetricgrpc.New(ctx,
 		otlpmetricgrpc.WithInsecure(),
 		otlpmetricgrpc.WithEndpoint(grpcEndpoint),
 	)
 	if err != nil {
-		log.Fatalf("Failed to create OTLP gRPC exporter: %v", err)
+		return nil, fmt.Errorf("failed to create OTLP gRPC exporter: %w", err)
 	}
 
 	hostName, _ := os.Hostname()
@@ -55,12 +53,12 @@ func InitProvider(serviceName string, grpcEndpoint string) func(context.Context)
 		runtime.WithMinimumReadMemStatsInterval(15*time.Second),
 	)
 	if err != nil {
-		log.Fatalf("Failed to start OpenTelemetry runtime instrumentation: %v", err)
+		return nil, fmt.Errorf("failed to start OpenTelemetry runtime instrumentation: %w", err)
 	}
 
 	go collectCPUMetric(ctx, provider)
 
-	return provider.Shutdown
+	return provider.Shutdown, nil
 }
 
 func collectCPUMetric(ctx context.Context, provider *sdkMetric.MeterProvider) {

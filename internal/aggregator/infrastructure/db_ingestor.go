@@ -3,6 +3,8 @@ package infrastructure
 import (
 	"MarketPulse/internal/aggregator/application"
 	"MarketPulse/internal/aggregator/domain"
+	"MarketPulse/internal/aggregator/infrastructure/common"
+	"MarketPulse/internal/aggregator/infrastructure/observation"
 	"MarketPulse/pkg/logger"
 	"context"
 	"sync"
@@ -11,13 +13,13 @@ import (
 
 type DBIngestor struct {
 	log         *logger.Logger
-	saveChan    <-chan *domain.CandleModel
+	saveChan    <-chan common.Envelope[domain.CandleModel]
 	candleCache application.ICandleCache
 	repository  application.ICandleRepository
 	batchSize   int
 }
 
-func NewDBIngestor(log *logger.Logger, saveChan <-chan *domain.CandleModel, candleCache application.ICandleCache, repository application.ICandleRepository, batchSize int) *DBIngestor {
+func NewDBIngestor(log *logger.Logger, saveChan <-chan common.Envelope[domain.CandleModel], candleCache application.ICandleCache, repository application.ICandleRepository, batchSize int) *DBIngestor {
 	return &DBIngestor{
 		log:         log,
 		saveChan:    saveChan,
@@ -54,7 +56,7 @@ func (d *DBIngestor) Start(ctx context.Context, wg *sync.WaitGroup) {
 				return
 			}
 
-			batch = append(batch, candle)
+			batch = append(batch, &candle.Payload)
 
 			if len(batch) >= d.batchSize {
 				batch = d.flush(ctx, batch)
@@ -65,6 +67,9 @@ func (d *DBIngestor) Start(ctx context.Context, wg *sync.WaitGroup) {
 }
 
 func (d *DBIngestor) flush(ctx context.Context, batch []*domain.CandleModel) []*domain.CandleModel {
+	ctx, span := observation.Tracer.Start(ctx, "flush_candles")
+	defer span.End()
+
 	if len(batch) == 0 {
 		return batch
 	}
