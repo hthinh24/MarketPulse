@@ -48,7 +48,7 @@ func NewBybitAdapter(log *logger.Logger, config *config.ExchangeConfig) *BybitAd
 
 // Start discovers symbols, creates per-symbol workers, subscribes to WebSocket feed,
 // dispatches events to workers, and handles re-subscribe requests from workers.
-func (b *BybitAdapter) Start(ctx context.Context, publishChan chan<- *domain.OrderBookSnapshot) error {
+func (b *BybitAdapter) Start(ctx context.Context, publishChan chan<- event.Envelope[*domain.OrderBookSnapshot]) error {
 	b.log.Info(ctx, "starting bybit adapter", logger.String("exchange", b.name))
 
 	// Discover symbols
@@ -63,7 +63,7 @@ func (b *BybitAdapter) Start(ctx context.Context, publishChan chan<- *domain.Ord
 	resyncChan := make(chan string, len(symbols))
 
 	// Create one worker + one channel per symbol to maintain their own order book state
-	workerChans := make(map[string]chan event.EventEnvelope, len(symbols))
+	workerChans := make(map[string]chan event.Envelope[domain.OrderBookEvent], len(symbols))
 	for _, symbol := range symbols {
 		state, err := service.NewOrderBookState(b.btreeDegree, b.snapshotQuantity)
 		if err != nil {
@@ -71,7 +71,7 @@ func (b *BybitAdapter) Start(ctx context.Context, publishChan chan<- *domain.Ord
 			return err
 		}
 
-		ch := make(chan event.EventEnvelope, b.symbolWorkerBufferSize)
+		ch := make(chan event.Envelope[domain.OrderBookEvent], b.symbolWorkerBufferSize)
 		workerChans[symbol] = ch
 
 		worker := newBybitSymbolWorker(b.log, b.name, symbol, b.deltaQueueSize, state, ch, resyncChan)
@@ -79,7 +79,7 @@ func (b *BybitAdapter) Start(ctx context.Context, publishChan chan<- *domain.Ord
 	}
 
 	// Subscribe to WebSocket feed and process updates
-	mainChan := make(chan event.EventEnvelope, b.streamBufferSize)
+	mainChan := make(chan event.Envelope[domain.OrderBookEvent], b.streamBufferSize)
 
 	// Chunk symbols into groups (Bybit allows max ~10 topics per connection)
 	chunkSize := 10
@@ -150,8 +150,8 @@ func (b *BybitAdapter) discoverSymbols(ctx context.Context) ([]string, error) {
 // dispatch routes WS events to the correct worker.
 func (b *BybitAdapter) dispatch(
 	ctx context.Context,
-	mainChan <-chan event.EventEnvelope,
-	workerChans map[string]chan event.EventEnvelope,
+	mainChan <-chan event.Envelope[domain.OrderBookEvent],
+	workerChans map[string]chan event.Envelope[domain.OrderBookEvent],
 ) {
 	for {
 		select {
@@ -176,7 +176,7 @@ func (b *BybitAdapter) dispatch(
 
 // connectAndListen connects to Bybit WebSocket and handles subscription with re-subscribe on gap.
 // Runs re-subscribe and message listening in parallel goroutines on same connection.
-func (b *BybitAdapter) connectAndListen(ctx context.Context, symbols []string, mainChan chan<- event.EventEnvelope, resyncChan <-chan string) {
+func (b *BybitAdapter) connectAndListen(ctx context.Context, symbols []string, mainChan chan<- event.Envelope[domain.OrderBookEvent], resyncChan <-chan string) {
 	topicMap := make(map[string]string)
 	for _, symbol := range symbols {
 		topicMap[symbol] = fmt.Sprintf("orderbook.50.%s", symbol)
@@ -278,7 +278,7 @@ func (b *BybitAdapter) sendSubscribe(conn *websocket.Conn, topics []string) erro
 }
 
 // listenAndProcess reads WebSocket messages and sends them to mainChan as envelopes.
-func (b *BybitAdapter) listenAndProcess(ctx context.Context, conn *websocket.Conn, mainChan chan<- event.EventEnvelope) {
+func (b *BybitAdapter) listenAndProcess(ctx context.Context, conn *websocket.Conn, mainChan chan<- event.Envelope[domain.OrderBookEvent]) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -301,10 +301,7 @@ func (b *BybitAdapter) listenAndProcess(ctx context.Context, conn *websocket.Con
 				Asks:         b.convertToOrderLevels(ctx, msg.Data.A),
 			}
 
-			envelope := event.EventEnvelope{
-				ReceivedAt: time.Now(),
-				Payload:    payload,
-			}
+			envelope := event.NewEnvelope[domain.OrderBookEvent](ctx, payload)
 
 			select {
 			case mainChan <- envelope:

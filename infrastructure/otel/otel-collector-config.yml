@@ -51,5 +51,5 @@ service:
 
     traces:
       receivers: [ otlp ]
-      processors: [ memory_limiter, batch, tail_sampling ]
+      processors: [ memory_limiter, tail_sampling ]
       exporters: [ otlp/tempo ]

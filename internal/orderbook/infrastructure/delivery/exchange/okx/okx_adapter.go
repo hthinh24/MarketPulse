@@ -47,7 +47,7 @@ func NewOKXAdapter(log *logger.Logger, config *config.ExchangeConfig) *OKXAdapte
 
 // Start discovers symbols, creates per-symbol workers, subscribes to WebSocket feed,
 // dispatches events to workers, and handles re-subscribe requests from workers.
-func (o *OKXAdapter) Start(ctx context.Context, publishChan chan<- *domain.OrderBookSnapshot) error {
+func (o *OKXAdapter) Start(ctx context.Context, publishChan chan<- event.Envelope[*domain.OrderBookSnapshot]) error {
 	o.log.Info(ctx, "starting okx adapter", logger.String("exchange", o.name))
 
 	// Discover symbols
@@ -62,7 +62,7 @@ func (o *OKXAdapter) Start(ctx context.Context, publishChan chan<- *domain.Order
 	resyncChan := make(chan string, len(symbols))
 
 	// Create one worker + one channel per symbol to maintain their own order book state
-	workerChans := make(map[string]chan event.EventEnvelope, len(symbols))
+	workerChans := make(map[string]chan event.Envelope[domain.OrderBookEvent], len(symbols))
 	for _, symbol := range symbols {
 		state, err := service.NewOrderBookState(o.btreeDegree, o.snapshotQuantity)
 		if err != nil {
@@ -70,7 +70,7 @@ func (o *OKXAdapter) Start(ctx context.Context, publishChan chan<- *domain.Order
 			return err
 		}
 
-		ch := make(chan event.EventEnvelope, o.symbolWorkerBufferSize)
+		ch := make(chan event.Envelope[domain.OrderBookEvent], o.symbolWorkerBufferSize)
 		workerChans[symbol] = ch
 
 		worker := newOKXSymbolWorker(o.log, o.name, symbol, o.deltaQueueSize, state, ch, resyncChan)
@@ -78,7 +78,7 @@ func (o *OKXAdapter) Start(ctx context.Context, publishChan chan<- *domain.Order
 	}
 
 	// Subscribe to WebSocket feed and process updates
-	mainChan := make(chan event.EventEnvelope, o.streamBufferSize)
+	mainChan := make(chan event.Envelope[domain.OrderBookEvent], o.streamBufferSize)
 
 	// Chunk symbols into groups (OKX allows ~10 channels per connection)
 	chunkSize := 10
@@ -151,8 +151,8 @@ func (o *OKXAdapter) discoverSymbols(ctx context.Context) ([]string, error) {
 // dispatch routes WS events to the correct worker.
 func (o *OKXAdapter) dispatch(
 	ctx context.Context,
-	mainChan <-chan event.EventEnvelope,
-	workerChans map[string]chan event.EventEnvelope,
+	mainChan <-chan event.Envelope[domain.OrderBookEvent],
+	workerChans map[string]chan event.Envelope[domain.OrderBookEvent],
 ) {
 	for {
 		select {
@@ -177,7 +177,7 @@ func (o *OKXAdapter) dispatch(
 
 // connectAndListen connects to OKX WebSocket and handles subscription with re-subscribe on gap.
 // Runs heartbeat, re-subscribe, and message listening in parallel on same connection.
-func (o *OKXAdapter) connectAndListen(ctx context.Context, symbols []string, mainChan chan<- event.EventEnvelope, resyncChan <-chan string) {
+func (o *OKXAdapter) connectAndListen(ctx context.Context, symbols []string, mainChan chan<- event.Envelope[domain.OrderBookEvent], resyncChan <-chan string) {
 	// Build instId map: instId → OKXWSArg object
 	instIdMap := make(map[string]OKXWSArg)
 	for _, symbol := range symbols {
@@ -306,7 +306,7 @@ func (o *OKXAdapter) sendUnsubscribe(conn *websocket.Conn, instId string) error 
 }
 
 // listenAndProcess reads WebSocket messages and sends them to mainChan as envelopes.
-func (o *OKXAdapter) listenAndProcess(ctx context.Context, conn *websocket.Conn, mainChan chan<- event.EventEnvelope) {
+func (o *OKXAdapter) listenAndProcess(ctx context.Context, conn *websocket.Conn, mainChan chan<- event.Envelope[domain.OrderBookEvent]) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -360,10 +360,7 @@ func (o *OKXAdapter) listenAndProcess(ctx context.Context, conn *websocket.Conn,
 				Asks:         o.convertToOrderLevels(msg.Data[0].Asks),
 			}
 
-			envelope := event.EventEnvelope{
-				ReceivedAt: time.Now(),
-				Payload:    payload,
-			}
+			envelope := event.NewEnvelope[domain.OrderBookEvent](ctx, payload)
 
 			select {
 			case mainChan <- envelope:

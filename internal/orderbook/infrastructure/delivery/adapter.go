@@ -3,6 +3,7 @@ package delivery
 import (
 	"MarketPulse/internal/orderbook/config"
 	"MarketPulse/internal/orderbook/domain"
+	"MarketPulse/internal/orderbook/infrastructure/delivery/event"
 	"MarketPulse/internal/orderbook/infrastructure/delivery/exchange/binance"
 	"MarketPulse/internal/orderbook/infrastructure/delivery/exchange/bybit"
 	"MarketPulse/internal/orderbook/infrastructure/delivery/exchange/okx"
@@ -14,7 +15,7 @@ import (
 // Each adapter is responsible for the complete lifecycle: symbol discovery,
 // WebSocket subscription, sequence validation, gap detection, and snapshot management.
 type ExchangeAdapter interface {
-	Start(ctx context.Context, publishChan chan<- *domain.OrderBookSnapshot) error
+	Start(ctx context.Context, publishChan chan<- event.Envelope[*domain.OrderBookSnapshot]) error
 }
 
 func NewExchangeAdapter(log *logger.Logger, exchangeConfig *config.ExchangeConfig) ExchangeAdapter {

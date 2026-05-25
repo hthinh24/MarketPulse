@@ -7,6 +7,8 @@ import (
 	"MarketPulse/internal/orderbook/service"
 	"MarketPulse/pkg/logger"
 	"context"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"time"
 )
 
@@ -18,12 +20,12 @@ type OKXSymbolWorker struct {
 	symbol         string // format: "BTC-USDT"
 	lastSeqId      int64
 	isSynced       bool
-	deltaQueue     []event.EventEnvelope
+	deltaQueue     []event.Envelope[domain.OrderBookEvent]
 	deltaQueueSize int
 	state          *service.OrderBookState
 
-	workerChan chan event.EventEnvelope // receives both deltas and snapshots from dispatcher
-	resyncChan chan<- string            // signals dispatcher to re-subscribe
+	workerChan chan event.Envelope[domain.OrderBookEvent] // receives both deltas and snapshots from dispatcher
+	resyncChan chan<- string                              // signals dispatcher to re-subscribe
 }
 
 func newOKXSymbolWorker(
@@ -31,7 +33,7 @@ func newOKXSymbolWorker(
 	exchange, symbol string,
 	deltaQueueSize int,
 	state *service.OrderBookState,
-	workerChan chan event.EventEnvelope,
+	workerChan chan event.Envelope[domain.OrderBookEvent],
 	resyncChan chan<- string,
 ) *OKXSymbolWorker {
 	return &OKXSymbolWorker{
@@ -40,7 +42,7 @@ func newOKXSymbolWorker(
 		symbol:         symbol,
 		lastSeqId:      0,
 		isSynced:       false,
-		deltaQueue:     make([]event.EventEnvelope, 0, deltaQueueSize),
+		deltaQueue:     make([]event.Envelope[domain.OrderBookEvent], 0, deltaQueueSize),
 		deltaQueueSize: deltaQueueSize,
 		state:          state,
 		workerChan:     workerChan,
@@ -48,7 +50,7 @@ func newOKXSymbolWorker(
 	}
 }
 
-func (w *OKXSymbolWorker) run(ctx context.Context, publishChan chan<- *domain.OrderBookSnapshot) {
+func (w *OKXSymbolWorker) run(ctx context.Context, publishChan chan<- event.Envelope[*domain.OrderBookSnapshot]) {
 	go w.state.RunEmitter(ctx, w.exchange, w.symbol, publishChan)
 
 	for {
@@ -69,7 +71,15 @@ func (w *OKXSymbolWorker) run(ctx context.Context, publishChan chan<- *domain.Or
 }
 
 // handleSnapshot applies snapshot to orderbook state and drains queued deltas.
-func (w *OKXSymbolWorker) handleSnapshot(ctx context.Context, orderbookEvent event.EventEnvelope) {
+func (w *OKXSymbolWorker) handleSnapshot(ctx context.Context, orderbookEvent event.Envelope[domain.OrderBookEvent]) {
+	_, span := observation.Tracer.Start(ctx, "orderbook_snapshot",
+		trace.WithAttributes(
+			attribute.String("exchange", w.exchange),
+			attribute.String("symbol", w.symbol),
+		),
+	)
+	defer span.End()
+
 	snapshot := orderbookEvent.Payload
 
 	w.state.ApplySnapshot(snapshot)
@@ -91,7 +101,15 @@ func (w *OKXSymbolWorker) handleSnapshot(ctx context.Context, orderbookEvent eve
 }
 
 // handleDelta applies sequence validation and state management per symbol (OKX uses prevSeqId).
-func (w *OKXSymbolWorker) handleDelta(ctx context.Context, orderbookEvent event.EventEnvelope) {
+func (w *OKXSymbolWorker) handleDelta(ctx context.Context, orderbookEvent event.Envelope[domain.OrderBookEvent]) {
+	_, span := observation.Tracer.Start(ctx, "orderbook_update",
+		trace.WithAttributes(
+			attribute.String("exchange", w.exchange),
+			attribute.String("symbol", w.symbol),
+		),
+	)
+	defer span.End()
+
 	delta := orderbookEvent.Payload
 
 	if !w.isSynced {
@@ -138,5 +156,5 @@ func (w *OKXSymbolWorker) handleDelta(ctx context.Context, orderbookEvent event.
 	w.state.ApplyUpdate(delta)
 	w.lastSeqId = delta.UpdateID
 	observation.RecordEvent(ctx, w.exchange, "applied")
-	observation.SampleLatency(ctx, w.exchange, time.Since(orderbookEvent.ReceivedAt))
+	observation.SampleLatency(ctx, w.exchange, time.Since(orderbookEvent.Timestamp))
 }

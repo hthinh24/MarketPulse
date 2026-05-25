@@ -2,6 +2,7 @@ package service
 
 import (
 	"MarketPulse/internal/orderbook/domain"
+	"MarketPulse/internal/orderbook/infrastructure/delivery/event"
 	"context"
 	"fmt"
 	"github.com/google/btree"
@@ -72,7 +73,7 @@ func (s *OrderBookState) ApplySnapshot(snapshot domain.OrderBookEvent) {
 	}
 }
 
-func (s *OrderBookState) EmitSnapshot(exchange, symbol string, publishChan chan<- *domain.OrderBookSnapshot) {
+func (s *OrderBookState) EmitSnapshot(exchange, symbol string, publishChan chan<- event.Envelope[*domain.OrderBookSnapshot]) {
 	snapshot := domain.SnapshotPool.Get().(*domain.OrderBookSnapshot)
 
 	snapshot.EventType = domain.EventSnapshot
@@ -97,7 +98,7 @@ func (s *OrderBookState) EmitSnapshot(exchange, symbol string, publishChan chan<
 	s.mu.RUnlock()
 
 	select {
-	case publishChan <- snapshot:
+	case publishChan <- event.NewEnvelope(context.Background(), snapshot):
 	default:
 		snapshot.Bids = snapshot.Bids[:0]
 		snapshot.Asks = snapshot.Asks[:0]
@@ -105,7 +106,7 @@ func (s *OrderBookState) EmitSnapshot(exchange, symbol string, publishChan chan<
 	}
 }
 
-func (s *OrderBookState) RunEmitter(ctx context.Context, exchange, symbol string, publishChan chan<- *domain.OrderBookSnapshot) {
+func (s *OrderBookState) RunEmitter(ctx context.Context, exchange, symbol string, publishChan chan<- event.Envelope[*domain.OrderBookSnapshot]) {
 	emitTicker := time.NewTicker(100 * time.Millisecond)
 	defer emitTicker.Stop()
 

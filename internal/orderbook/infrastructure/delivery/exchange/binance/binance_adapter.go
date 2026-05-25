@@ -58,7 +58,7 @@ func NewBinanceAdapter(log *logger.Logger, config *config.ExchangeConfig) *Binan
 
 // Start discovers symbols, creates per-symbol workers, subscribes to WebSocket feed,
 // dispatches events to workers, and handles resync requests from workers.
-func (b *BinanceAdapter) Start(ctx context.Context, publishChan chan<- *domain.OrderBookSnapshot) error {
+func (b *BinanceAdapter) Start(ctx context.Context, publishChan chan<- event.Envelope[*domain.OrderBookSnapshot]) error {
 	b.log.Info(ctx, "starting binance adapter", logger.String("exchange", b.name))
 
 	// Discover symbols
@@ -73,7 +73,7 @@ func (b *BinanceAdapter) Start(ctx context.Context, publishChan chan<- *domain.O
 	resyncChan := make(chan string, len(symbols))
 
 	// Create one worker + one channel per symbol to maintain their own order book state
-	workerChans := make(map[string]chan event.EventEnvelope, len(symbols))
+	workerChans := make(map[string]chan event.Envelope[domain.OrderBookEvent], len(symbols))
 	for _, symbol := range symbols {
 		state, err := service.NewOrderBookState(b.btreeDegree, b.snapshotQuantity)
 		if err != nil {
@@ -81,7 +81,7 @@ func (b *BinanceAdapter) Start(ctx context.Context, publishChan chan<- *domain.O
 			return err
 		}
 
-		ch := make(chan event.EventEnvelope, b.symbolWorkerBufferSize)
+		ch := make(chan event.Envelope[domain.OrderBookEvent], b.symbolWorkerBufferSize)
 		workerChans[symbol] = ch
 
 		worker := newBinanceSymbolWorker(b.log, b.name, symbol, b.deltaQueueSize, state, ch, resyncChan)
@@ -102,7 +102,7 @@ func (b *BinanceAdapter) Start(ctx context.Context, publishChan chan<- *domain.O
 	}
 
 	// Subscribe to WebSocket feed and process updates
-	mainChan := make(chan event.EventEnvelope, b.streamBufferSize)
+	mainChan := make(chan event.Envelope[domain.OrderBookEvent], b.streamBufferSize)
 	go b.subscribeOrderBooks(ctx, symbols, mainChan)
 
 	// Dispatch incoming events to workers, handle resync requests from workers
@@ -118,8 +118,8 @@ func (b *BinanceAdapter) Start(ctx context.Context, publishChan chan<- *domain.O
 // dispatch routes WS events to the correct worker and handles resync requests.
 func (b *BinanceAdapter) dispatch(
 	ctx context.Context,
-	mainChan <-chan event.EventEnvelope,
-	workerChans map[string]chan event.EventEnvelope,
+	mainChan <-chan event.Envelope[domain.OrderBookEvent],
+	workerChans map[string]chan event.Envelope[domain.OrderBookEvent],
 	resyncChan <-chan string,
 ) {
 	for {
@@ -181,7 +181,7 @@ func (b *BinanceAdapter) discoverSymbols(ctx context.Context) ([]string, error) 
 }
 
 // subscribeOrderBooks connects to Binance WebSocket and streams updates.
-func (b *BinanceAdapter) subscribeOrderBooks(ctx context.Context, symbols []string, deltaChan chan<- event.EventEnvelope) {
+func (b *BinanceAdapter) subscribeOrderBooks(ctx context.Context, symbols []string, deltaChan chan<- event.Envelope[domain.OrderBookEvent]) {
 	chunkSize := 300
 
 	for i := 0; i < len(symbols); i += chunkSize {
@@ -196,7 +196,7 @@ func (b *BinanceAdapter) subscribeOrderBooks(ctx context.Context, symbols []stri
 }
 
 // connectAndListenChunk handles a chunk of symbols via WebSocket with reconnection.
-func (b *BinanceAdapter) connectAndListenChunk(ctx context.Context, chunk []string, deltaChan chan<- event.EventEnvelope) {
+func (b *BinanceAdapter) connectAndListenChunk(ctx context.Context, chunk []string, deltaChan chan<- event.Envelope[domain.OrderBookEvent]) {
 	var streams []string
 	for _, symbol := range chunk {
 		streams = append(streams, fmt.Sprintf("%s@depth@100ms", strings.ToLower(symbol)))
@@ -234,7 +234,7 @@ func (b *BinanceAdapter) connectAndListenChunk(ctx context.Context, chunk []stri
 }
 
 // listenAndProcess reads messages from WebSocket and sends them to deltaChan.
-func (b *BinanceAdapter) listenAndProcess(ctx context.Context, conn *websocket.Conn, deltaChan chan<- event.EventEnvelope) {
+func (b *BinanceAdapter) listenAndProcess(ctx context.Context, conn *websocket.Conn, deltaChan chan<- event.Envelope[domain.OrderBookEvent]) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -251,10 +251,7 @@ func (b *BinanceAdapter) listenAndProcess(ctx context.Context, conn *websocket.C
 				continue
 			}
 
-			orderbookEvent := event.EventEnvelope{
-				ReceivedAt: time.Now(),
-				Payload:    *payload,
-			}
+			orderbookEvent := event.NewEnvelope[domain.OrderBookEvent](ctx, *payload)
 
 			select {
 			case deltaChan <- orderbookEvent:
@@ -267,7 +264,7 @@ func (b *BinanceAdapter) listenAndProcess(ctx context.Context, conn *websocket.C
 
 // resyncWithBackoff fetches a snapshot and pushes it into the worker channel.
 // Handles Binance rate limit (429/418) base on Retry-After header.
-func (b *BinanceAdapter) resyncWithBackoff(ctx context.Context, symbol string, workerChan chan<- event.EventEnvelope) {
+func (b *BinanceAdapter) resyncWithBackoff(ctx context.Context, symbol string, workerChan chan<- event.Envelope[domain.OrderBookEvent]) {
 	delay := time.Duration(b.retryInitialDelayMs) * time.Millisecond
 	maxDelay := time.Duration(b.retryMaxDelayMs) * time.Millisecond
 
@@ -301,12 +298,10 @@ func (b *BinanceAdapter) resyncWithBackoff(ctx context.Context, symbol string, w
 			continue
 		}
 
-		envelope := event.EventEnvelope{
-			ReceivedAt: time.Now(),
-			Payload:    *snapshot,
-		}
+		orderbookEvent := event.NewEnvelope[domain.OrderBookEvent](ctx, *snapshot)
+
 		select {
-		case workerChan <- envelope:
+		case workerChan <- orderbookEvent:
 			b.log.Info(ctx, "resync succeeded", logger.String("symbol", symbol), logger.Int("attempts", attempt+1))
 		case <-ctx.Done():
 			return

@@ -4,9 +4,11 @@ import (
 	"MarketPulse/internal/server/config"
 	"MarketPulse/internal/server/controller"
 	"MarketPulse/internal/server/infrastructure"
+	"MarketPulse/internal/server/infrastructure/observation"
 	repository "MarketPulse/internal/server/infrastructure/repository/postgres"
 	cache "MarketPulse/internal/server/infrastructure/repository/redis"
 	"MarketPulse/internal/server/service"
+	"MarketPulse/internal/telemetry"
 	"MarketPulse/pkg/logger"
 	"context"
 	"fmt"
@@ -14,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
 	"github.com/joho/godotenv"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"log"
@@ -45,6 +48,15 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	serviceName := "marketpulse-api-server"
+
+	shutdown, err := initTelemetry(ctx, serviceName, cfg.OTLP.Endpoint)
+	if err != nil {
+		log.Error(ctx, "failed to initialize telemetry", err)
+		os.Exit(1)
+	}
+	defer shutdown(ctx)
+
 	defer func() {
 		if err := rdb.Close(); err != nil {
 			log.Info(ctx, "Redis client closed")
@@ -67,6 +79,7 @@ func main() {
 
 	r := gin.Default()
 	r.Use(cors.Default())
+	r.Use(otelgin.Middleware(serviceName))
 
 	v1 := r.Group("/api/v1")
 	candleController.RegisterRoutes(v1)
@@ -154,4 +167,24 @@ func InitCacheWarmup(ctx context.Context, log *logger.Logger, repository service
 	}
 
 	log.Info(ctx, "Cache warm up completed")
+}
+
+func initTelemetry(ctx context.Context, serviceName string, otlpEndpoint string) (func(context.Context) error, error) {
+	shutdownMetrics, err := telemetry.InitMetricsProvider(ctx, serviceName, otlpEndpoint)
+	if err != nil {
+		return nil, fmt.Errorf("metrics provider: %w", err)
+	}
+
+	shutdownTracing, err := telemetry.InitTracingProvider(ctx, serviceName, otlpEndpoint)
+	if err != nil {
+		return nil, fmt.Errorf("tracing provider: %w", err)
+	}
+	observation.InitTracer(serviceName)
+
+	return func(ctx context.Context) error {
+		if err := shutdownTracing(ctx); err != nil {
+			return err
+		}
+		return shutdownMetrics(ctx)
+	}, nil
 }
