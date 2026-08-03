@@ -76,8 +76,13 @@ Redis Pub/Sub for immediate relay to connected clients.
 
 ---
 
-## Metric Screenshots
+## Screenshots
+### UI
+![Binance](./assets/ui/binance.png)
 
+![OKX](./assets/ui/okx.png)
+
+### Metrics
 **Aggregator**
 ![Aggregator Metrics](./assets/metrics/aggregator.png)
 
